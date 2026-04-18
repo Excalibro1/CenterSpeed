@@ -120,6 +120,7 @@ public class CenterSpeed : IModSharpModule, IGameListener, IClientListener
         _particleConVar = convarManager.CreateConVar("ms_cspeed_particle", "particles/digits_x/digits_x.vpcf");
 
         _clientManager.InstallCommandCallback("hudsettings", OnHudSettingsCommand);
+        _clientManager.InstallCommandCallback("hud", OnHudSettingsCommand);
 
         _logger.LogInformation("CenterSpeed loaded");
 
@@ -477,7 +478,7 @@ public class CenterSpeed : IModSharpModule, IGameListener, IClientListener
         }
         else
         {
-            client.GetPlayerController()?.Print(HudPrintChannel.Chat, " [HUD] Subcommands: offset <1-4> <-10..10> | scale <0-10> | yoffset <-10-10> | info");
+            client.GetPlayerController()?.Print(HudPrintChannel.Chat, " [HUD] Subcommands: toggle | offset <1-4> <-10..10> | scale <0-10> | yoffset <-10-10> | info");
         }
         return ECommandAction.Stopped;
     }

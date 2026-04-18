@@ -117,7 +117,7 @@ public class CenterSpeed : IModSharpModule, IGameListener, IClientListener
         _sharedSystem.GetModSharp().InstallGameListener(this);
 
         var convarManager = _sharedSystem.GetConVarManager();
-        _particleConVar = convarManager.CreateConVar("ms_cspeed_particle", "particles/digits_x/digits_x.vpcf");
+        _particleConVar = convarManager.CreateConVar("ms_cspeed_particle", "particles/numbers/number_x.vpcf");
 
         _clientManager.InstallCommandCallback("hudsettings", OnHudSettingsCommand);
         _clientManager.InstallCommandCallback("hud", OnHudSettingsCommand);

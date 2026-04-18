@@ -63,16 +63,18 @@ public class CenterSpeed : IModSharpModule, IGameListener, IClientListener
 
     private readonly Dictionary<int, int> _numbersMap = new()
     {
-        [0] = 0,
-        [1] = 1,
-        [2] = 2,
-        [3] = 3,
-        [4] = 4,
-        [5] = 5,
-        [6] = 6,
-        [7] = 7,
-        [8] = 8,
-        [9] = 9,
+        // Workshop numbers_x atlases often include non-digit frames in between
+        // digit frames, so direct 0..9 indexing picks the wrong glyphs.
+        [0] = 1,
+        [1] = 2,
+        [2] = 4,
+        [3] = 5,
+        [4] = 7,
+        [5] = 8,
+        [6] = 10,
+        [7] = 11,
+        [8] = 12,
+        [9] = 13,
     };
 
     private class PlayerHudSettings

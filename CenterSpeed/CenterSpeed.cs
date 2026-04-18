@@ -14,6 +14,11 @@ namespace CenterSpeed;
 
 public class CenterSpeed : IModSharpModule, IGameListener, IClientListener
 {
+    private enum ParticleProfile
+    {
+        DigitsX,
+        Numbers
+    }
     string IModSharpModule.DisplayName => "Center Speed";
     string IModSharpModule.DisplayAuthor => "Lethal & Retro";
 
@@ -42,7 +47,7 @@ public class CenterSpeed : IModSharpModule, IGameListener, IClientListener
     private IBaseEntity? _sharedTarget;
     private IConVar? _particleConVar;
 
-    private Dictionary<int, int> _digitMap = new()
+    private readonly Dictionary<int, int> _digitsXMap = new()
     {
         [0] = 1,
         [1] = 2,
@@ -54,6 +59,20 @@ public class CenterSpeed : IModSharpModule, IGameListener, IClientListener
         [7] = 11,
         [8] = 12,
         [9] = 13,
+    };
+
+    private readonly Dictionary<int, int> _numbersMap = new()
+    {
+        [0] = 0,
+        [1] = 1,
+        [2] = 2,
+        [3] = 3,
+        [4] = 4,
+        [5] = 5,
+        [6] = 6,
+        [7] = 7,
+        [8] = 8,
+        [9] = 9,
     };
 
     private class PlayerHudSettings
@@ -69,6 +88,7 @@ public class CenterSpeed : IModSharpModule, IGameListener, IClientListener
     {
         // Index 0 = thousands, 1 = hundreds, 2 = tens, 3 = ones
         public bool IsDisposed = false;
+        public ParticleProfile Profile = ParticleProfile.DigitsX;
         public IBaseParticle?[] Digits { get; } = new IBaseParticle?[4];
     }
 
@@ -214,6 +234,7 @@ public class CenterSpeed : IModSharpModule, IGameListener, IClientListener
         if (!settings.Enabled) return;
 
         var particleName = _particleConVar?.GetString() ?? "particles/numbers/number_x.vpcf";
+        state.Profile = ResolveProfile(particleName);
 
 
         for (var i = 0; i < 4; i++)
@@ -336,7 +357,7 @@ public class CenterSpeed : IModSharpModule, IGameListener, IClientListener
                 continue;
             }
 
-            var digit = _digitMap.GetValueOrDefault(digits[i], 1);
+            var digit = GetDigitFrame(digits[i], state.Profile);
 
             SetControlPointValue(particle, 32, new Vector((float)digit, 0f, 0f));
             if (_lastSpeed[client.Slot] > speed)
@@ -570,6 +591,24 @@ public class CenterSpeed : IModSharpModule, IGameListener, IClientListener
 
         _logger.LogWarning("No free server controlled control points for CP {CpIndex}", cpIndex);
         return false;
+    }
+
+    private ParticleProfile ResolveProfile(string particleName)
+    {
+        if (particleName.Contains("/numbers/", StringComparison.OrdinalIgnoreCase)
+            || particleName.Contains("number_x", StringComparison.OrdinalIgnoreCase))
+            return ParticleProfile.Numbers;
+
+        return ParticleProfile.DigitsX;
+    }
+
+    private int GetDigitFrame(int digit, ParticleProfile profile)
+    {
+        digit = Math.Clamp(digit, 0, 9);
+
+        return profile == ParticleProfile.Numbers
+            ? _numbersMap.GetValueOrDefault(digit, 0)
+            : _digitsXMap.GetValueOrDefault(digit, 1);
     }
 
     public void OnResourcePrecache()

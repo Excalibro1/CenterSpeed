@@ -41,6 +41,9 @@ public class CenterSpeed : IModSharpModule, IGameListener, IClientListener
     private float[] _lastSpeed = new float[64];
     private IBaseEntity? _sharedTarget;
     private IConVar? _particleConVar;
+    private IConVar? _testLettersConVar;
+    private IConVar? _testLettersStartFrameConVar;
+    private IConVar? _testLettersCountConVar;
 
     private Dictionary<int, int> _digitMap = new()
     {
@@ -97,7 +100,10 @@ public class CenterSpeed : IModSharpModule, IGameListener, IClientListener
         _sharedSystem.GetModSharp().InstallGameListener(this);
 
         var convarManager = _sharedSystem.GetConVarManager();
-        _particleConVar = convarManager.CreateConVar("ms_cspeed_particle", "particles/digits_x/digits_x.vpcf");
+        _particleConVar = convarManager.CreateConVar("ms_cspeed_particle", "particles/numbers/number_x.vpcf");
+        _testLettersConVar = convarManager.CreateConVar("ms_cspeed_test_letters", "0");
+        _testLettersStartFrameConVar = convarManager.CreateConVar("ms_cspeed_test_letters_start", "14");
+        _testLettersCountConVar = convarManager.CreateConVar("ms_cspeed_test_letters_count", "9");
 
         _clientManager.InstallCommandCallback("hud", OnHudSettingsCommand);
 
@@ -306,22 +312,46 @@ public class CenterSpeed : IModSharpModule, IGameListener, IClientListener
             return;
 
 
-        // Default to 0 so dead/spectating players show "0000".
+        var frameIndexes = new int[4];
         var speed = 0;
-        var pawn = controller.GetPlayerPawn();
+        var lettersTestEnabled = IsLettersTestEnabled();
 
-        if (pawn != null)
+        if (lettersTestEnabled)
         {
-            var v = pawn.GetAbsVelocity().Length2D();
-            speed = (int)Math.Clamp(v, 0f, 9999f);
+            var startFrame = ParseConVarInt(_testLettersStartFrameConVar, 14, 0, 255);
+            var lettersCount = ParseConVarInt(_testLettersCountConVar, 9, 1, 64);
+            var phase = (_modSharp.GetGlobals().TickCount / 10) % lettersCount;
+            var frame = startFrame + phase;
+
+            for (var i = 0; i < 4; i++)
+            {
+                frameIndexes[i] = frame;
+            }
         }
-        var digits = new int[4]
+        else
         {
-            speed / 1000,
-            speed / 100  % 10,
-            speed / 10   % 10,
-            speed        % 10
-        };
+            // Default to 0 so dead/spectating players show "0000".
+            var pawn = controller.GetPlayerPawn();
+
+            if (pawn != null)
+            {
+                var v = pawn.GetAbsVelocity().Length2D();
+                speed = (int)Math.Clamp(v, 0f, 9999f);
+            }
+
+            var digits = new int[4]
+            {
+                speed / 1000,
+                speed / 100  % 10,
+                speed / 10   % 10,
+                speed        % 10
+            };
+
+            for (var i = 0; i < 4; i++)
+            {
+                frameIndexes[i] = _digitMap.GetValueOrDefault(digits[i], 1);
+            }
+        }
 
         // Update digit frames.
         for (var i = 0; i < 4; i++)
@@ -332,10 +362,12 @@ public class CenterSpeed : IModSharpModule, IGameListener, IClientListener
                 continue;
             }
 
-            var digit = _digitMap.GetValueOrDefault(digits[i], 1);
-
-            SetControlPointValue(particle, 32, new Vector((float)digit, 0f, 0f));
-            if (_lastSpeed[client.Slot] > speed)
+            SetControlPointValue(particle, 32, new Vector((float)frameIndexes[i], 0f, 0f));
+            if (lettersTestEnabled)
+            {
+                SetControlPointValue(particle, 16, new Vector(255f, 255f, 255f));
+            }
+            else if (_lastSpeed[client.Slot] > speed)
             {
                 SetControlPointValue(particle, 16, new Vector(255f, 0f, 0f));
             }
@@ -385,7 +417,7 @@ public class CenterSpeed : IModSharpModule, IGameListener, IClientListener
 
             settings.DigitOffsets[i] = value;
             SaveSettings(client.SteamId, settings);
-            SpawnPlayerHud(client);
+            ApplySettingsToHud(client.Slot, settings);
             client.GetPlayerController()?.Print(HudPrintChannel.Chat, $" [HUD] Digit {index1} offset set to {value:F2}");
         }
         else if (sub == "scale")
@@ -401,7 +433,7 @@ public class CenterSpeed : IModSharpModule, IGameListener, IClientListener
             value = Math.Clamp(value, 0f, 10f);
             settings.HudScale = value;
             SaveSettings(client.SteamId, settings);
-            SpawnPlayerHud(client);
+            ApplySettingsToHud(client.Slot, settings);
             client.GetPlayerController()?.Print(HudPrintChannel.Chat, $" [HUD] Scale set to {value:F2}");
         }
         else if (sub == "yoffset")
@@ -417,7 +449,7 @@ public class CenterSpeed : IModSharpModule, IGameListener, IClientListener
             offset = Math.Clamp(offset, -10f, 10f);
             settings.YOffset = offset;
             SaveSettings(client.SteamId, settings);
-            SpawnPlayerHud(client);
+            ApplySettingsToHud(client.Slot, settings);
             client.GetPlayerController()?.Print(HudPrintChannel.Chat, $" [HUD] Y-Offset set to {offset:F2}");
         }
         else if (sub == "toggle")
@@ -548,6 +580,48 @@ public class CenterSpeed : IModSharpModule, IGameListener, IClientListener
         return false;
     }
 
+    private bool IsLettersTestEnabled()
+    {
+        var raw = _testLettersConVar?.GetString();
+        if (string.IsNullOrWhiteSpace(raw))
+            return false;
+
+        return raw.Equals("1", StringComparison.OrdinalIgnoreCase)
+            || raw.Equals("true", StringComparison.OrdinalIgnoreCase)
+            || raw.Equals("yes", StringComparison.OrdinalIgnoreCase)
+            || raw.Equals("on", StringComparison.OrdinalIgnoreCase);
+    }
+
+    private int ParseConVarInt(IConVar? conVar, int fallback, int min, int max)
+    {
+        if (conVar == null)
+            return fallback;
+
+        if (!int.TryParse(conVar.GetString(), out var value))
+            return fallback;
+
+        return Math.Clamp(value, min, max);
+    }
+
+    private void ApplySettingsToHud(int slot, PlayerHudSettings settings)
+    {
+        var state = _huds[slot];
+        if (state == null || state.IsDisposed)
+            return;
+
+        for (var i = 0; i < 4; i++)
+        {
+            var particle = state.Digits[i];
+            if (particle == null || !particle.IsValid())
+                continue;
+
+            var cp33 = new Vector(settings.DigitOffsets[i], settings.YOffset, 0f);
+            particle.DataControlPoint = 33;
+            particle.DataControlPointValue = cp33;
+            SetControlPointValue(particle, 33, cp33);
+            SetControlPointValue(particle, 34, new Vector(settings.HudScale, 0f, 0f));
+        }
+    }
     public void OnResourcePrecache()
     {
         var assetPath = Path.Combine(_sharpPath, "assets");

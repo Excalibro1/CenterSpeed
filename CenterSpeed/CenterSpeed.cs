@@ -484,7 +484,28 @@ public class CenterSpeed : IModSharpModule, IGameListener, IClientListener
                     }
                     else
                     {
-                        BuildWidgetGlyphLayout(_widgetText[slot] ?? string.Empty, settings, frameIndexes, glyphPositions, out glyphCount);
+                        // Timer feed may be temporarily unavailable on join/map change.
+                        // Fall back to live speed digits so HUD never disappears.
+                        var pawn = controller.GetPlayerPawn();
+                        if (pawn != null)
+                        {
+                            var v = pawn.GetAbsVelocity().Length2D();
+                            speed = (int)Math.Clamp(v, 0f, 9999f);
+                        }
+
+                        var digits = new int[4]
+                        {
+                            speed / 1000,
+                            speed / 100  % 10,
+                            speed / 10   % 10,
+                            speed        % 10
+                        };
+                        glyphCount = 4;
+                        for (var i = 0; i < 4; i++)
+                        {
+                            frameIndexes[i] = _digitMap.GetValueOrDefault(digits[i], 0);
+                            glyphPositions[i] = GetGlyphPosition(i, glyphCount, HudDisplayMode.Speed, settings);
+                        }
                     }
 
                     break;

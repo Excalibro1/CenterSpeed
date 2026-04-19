@@ -15,6 +15,7 @@ namespace CenterSpeed;
 
 public class CenterSpeed : IModSharpModule, IGameListener, IClientListener
 {
+    private const string BuildTag = "cs-build-20260420a";
     private const int HudParticleCapacity = 64;
     // Wider spacing for world-space particle text readability.
     private const float WidgetCharSpacing = 1.35f;
@@ -178,7 +179,7 @@ public class CenterSpeed : IModSharpModule, IGameListener, IClientListener
         _clientManager.InstallCommandCallback("ms_cspeed_widget_clearline", OnWidgetClearLineCommand);
         _clientManager.InstallCommandCallback("ms_cspeed_widget_mode", OnWidgetModeCommand);
 
-        _logger.LogInformation("CenterSpeed loaded (letters control via !hud letters ...)");
+        _logger.LogInformation("CenterSpeed loaded ({BuildTag}, letters control via !hud letters ...)", BuildTag);
 
         _hookManager.PlayerRunCommand.InstallHookPost(PlayerRunCommandPost);
         _hookManager.PlayerSpawnPost.InstallForward(OnPlayerSpawned);
@@ -996,6 +997,7 @@ public class CenterSpeed : IModSharpModule, IGameListener, IClientListener
         client.GetPlayerController()?.Print(HudPrintChannel.Chat, $" [HUD] Offsets: 1={o[0]:F2}  2={o[1]:F2}  3={o[2]:F2}  4={o[3]:F2}");
         client.GetPlayerController()?.Print(HudPrintChannel.Chat, $" [HUD] Scale: {settings.HudScale:F4}");
         client.GetPlayerController()?.Print(HudPrintChannel.Chat, $" [HUD] Y-Offset: {settings.YOffset:F4}");
+        client.GetPlayerController()?.Print(HudPrintChannel.Chat, $" [HUD] Build: {BuildTag}");
         client.GetPlayerController()?.Print(HudPrintChannel.Chat, $" [HUD] Mode: {_displayModes[client.Slot]}");
         client.GetPlayerController()?.Print(HudPrintChannel.Chat, $" [HUD] Timer: running={_timerRunning[client.Slot]} ticks={GetPlayerTimerTicks(client.Slot)}");
         client.GetPlayerController()?.Print(HudPrintChannel.Chat, $" [HUD] Letters: enabled={_lettersTestEnabled} start={_lettersStartFrame} count={_lettersCount} ticks={_updateTicks}");

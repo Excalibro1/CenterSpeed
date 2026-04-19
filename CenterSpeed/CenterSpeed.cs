@@ -9,11 +9,25 @@ using Sharp.Shared.Listeners;
 using Sharp.Shared.Managers;
 using Sharp.Shared.Objects;
 using Sharp.Shared.Types;
+using Source2Surf.Timer.Shared.Interfaces;
 
 namespace CenterSpeed;
 
 public class CenterSpeed : IModSharpModule, IGameListener, IClientListener
 {
+    private const int HudParticleCapacity = 64;
+    private const float WidgetCharSpacing = 0.22f;
+    private const float WidgetLineSpacing = 0.26f;
+    private const int WidgetMaxLines = 5;
+
+    private enum HudDisplayMode
+    {
+        Speed = 0,
+        Timer = 1,
+        Widget = 2,
+        TimerWidget = 3
+    }
+
     string IModSharpModule.DisplayName => "Center Speed";
     string IModSharpModule.DisplayAuthor => "Lethal & Retro";
 
@@ -33,30 +47,78 @@ public class CenterSpeed : IModSharpModule, IGameListener, IClientListener
     private readonly IHookManager _hookManager;
     private readonly ISharpModuleManager _modules;
     private IModSharpModuleInterface<IClientPreference>? _cachedInterface;
+    private IModSharpModuleInterface<ITimerHudFeed>? _timerHudFeedInterface;
     private IDisposable? _callback;
 
     // --- Per-player HUD state ---
     private readonly PlayerHudState?[] _huds = new PlayerHudState?[64];
     private readonly PlayerHudSettings?[] _playerSettings = new PlayerHudSettings?[64];
     private float[] _lastSpeed = new float[64];
+    private readonly HudDisplayMode[] _displayModes = new HudDisplayMode[64];
+    private readonly string[] _widgetText = new string[64];
+    private readonly bool[] _timerRunning = new bool[64];
+    private readonly int[] _timerBaseTicks = new int[64];
+    private readonly int[] _timerStartTick = new int[64];
     private IBaseEntity? _sharedTarget;
     private IConVar? _particleConVar;
     private IConVar? _testLettersConVar;
     private IConVar? _testLettersStartFrameConVar;
     private IConVar? _testLettersCountConVar;
+    private IConVar? _updateTicksConVar;
+    private bool _lettersTestEnabled = false;
+    private int _lettersStartFrame = 11;
+    private int _lettersCount = 26;
+    private int _updateTicks = 2;
 
     private Dictionary<int, int> _digitMap = new()
     {
         [0] = 1,
         [1] = 2,
-        [2] = 4,
-        [3] = 5,
-        [4] = 7,
-        [5] = 8,
-        [6] = 10,
-        [7] = 11,
-        [8] = 12,
-        [9] = 13,
+        [2] = 3,
+        [3] = 4,
+        [4] = 5,
+        [5] = 6,
+        [6] = 7,
+        [7] = 8,
+        [8] = 9,
+        [9] = 10,
+    };
+
+    private readonly Dictionary<char, int> _glyphMap = new()
+    {
+        [' '] = 0,
+        ['.'] = 37,
+        [','] = 38,
+        [':'] = 39,
+        [';'] = 40,
+        ['+'] = 41,
+        ['-'] = 42,
+        ['*'] = 43,
+        ['/'] = 44,
+        ['='] = 45,
+        ['%'] = 46,
+        ['('] = 47,
+        [')'] = 48,
+        ['['] = 49,
+        [']'] = 50,
+        ['{'] = 51,
+        ['}'] = 52,
+        ['<'] = 53,
+        ['>'] = 54,
+        ['!'] = 55,
+        ['?'] = 56,
+        ['@'] = 57,
+        ['#'] = 58,
+        ['$'] = 59,
+        ['^'] = 60,
+        ['&'] = 61,
+        ['_'] = 62,
+        ['\\'] = 63,
+        ['|'] = 64,
+        ['"'] = 65,
+        ['\''] = 66,
+        ['`'] = 67,
+        ['~'] = 68
     };
 
     private class PlayerHudSettings
@@ -70,9 +132,11 @@ public class CenterSpeed : IModSharpModule, IGameListener, IClientListener
 
     private class PlayerHudState
     {
-        // Index 0 = thousands, 1 = hundreds, 2 = tens, 3 = ones
         public bool IsDisposed = false;
-        public IBaseParticle?[] Digits { get; } = new IBaseParticle?[4];
+        public IBaseParticle?[] Digits { get; } = new IBaseParticle?[HudParticleCapacity];
+        public int[] LastFrames { get; } = Enumerable.Repeat(-1, HudParticleCapacity).ToArray();
+        public int LastColorMode { get; set; } = -1;
+        public int ActiveGlyphCount { get; set; } = 0;
     }
 
     public CenterSpeed(
@@ -104,10 +168,16 @@ public class CenterSpeed : IModSharpModule, IGameListener, IClientListener
         _testLettersConVar = convarManager.CreateConVar("ms_cspeed_test_letters", "0");
         _testLettersStartFrameConVar = convarManager.CreateConVar("ms_cspeed_test_letters_start", "14");
         _testLettersCountConVar = convarManager.CreateConVar("ms_cspeed_test_letters_count", "9");
+        _updateTicksConVar = convarManager.CreateConVar("ms_cspeed_update_ticks", "1");
 
         _clientManager.InstallCommandCallback("hud", OnHudSettingsCommand);
+        _clientManager.InstallCommandCallback("ms_cspeed_widget_set", OnWidgetSetCommand);
+        _clientManager.InstallCommandCallback("ms_cspeed_widget_setline", OnWidgetSetLineCommand);
+        _clientManager.InstallCommandCallback("ms_cspeed_widget_clear", OnWidgetClearCommand);
+        _clientManager.InstallCommandCallback("ms_cspeed_widget_clearline", OnWidgetClearLineCommand);
+        _clientManager.InstallCommandCallback("ms_cspeed_widget_mode", OnWidgetModeCommand);
 
-        _logger.LogInformation("CenterSpeed loaded");
+        _logger.LogInformation("CenterSpeed loaded (letters control via !hud letters ...)");
 
         _hookManager.PlayerRunCommand.InstallHookPost(PlayerRunCommandPost);
         _hookManager.PlayerSpawnPost.InstallForward(OnPlayerSpawned);
@@ -156,6 +226,7 @@ public class CenterSpeed : IModSharpModule, IGameListener, IClientListener
     public void OnClientPostAdminCheck(IGameClient client)
     {
         _playerSettings[client.Slot] = new();
+        _displayModes[client.Slot] = HudDisplayMode.TimerWidget;
     }
 
     private void OnPlayerSpawned(IPlayerSpawnForwardParams param)
@@ -172,6 +243,11 @@ public class CenterSpeed : IModSharpModule, IGameListener, IClientListener
     {
         KillPlayerHud(client.Slot);
         _playerSettings[client.Slot] = null;
+        _displayModes[client.Slot] = HudDisplayMode.Speed;
+        _widgetText[client.Slot] = string.Empty;
+        _timerRunning[client.Slot] = false;
+        _timerBaseTicks[client.Slot] = 0;
+        _timerStartTick[client.Slot] = 0;
     }
 
     // -------------------------------------------------------------------------
@@ -222,7 +298,7 @@ public class CenterSpeed : IModSharpModule, IGameListener, IClientListener
         var particleName = _particleConVar?.GetString() ?? "particles/numbers/number_x.vpcf";
 
 
-        for (var i = 0; i < 4; i++)
+        for (var i = 0; i < HudParticleCapacity; i++)
         {
             var kv = new Dictionary<string, KeyValuesVariantValueItem>
             {
@@ -241,8 +317,10 @@ public class CenterSpeed : IModSharpModule, IGameListener, IClientListener
 
             particle.GetControlPointEntities()[17] = _sharedTarget.Handle;
 
+            var hidden = GetHiddenGlyphPosition(settings);
             particle.DataControlPoint = 33;
-            particle.DataControlPointValue = new Vector(settings.DigitOffsets[i], settings.YOffset, 0f);
+            particle.DataControlPointValue = hidden;
+            SetControlPointValue(particle, 33, hidden);
 
             SetControlPointValue(particle, 32, new Vector(0f, 0f, 0f)); // digit frame (0)
             SetControlPointValue(particle, 34, new Vector(settings.HudScale, 0f, 0f)); // scale
@@ -258,11 +336,12 @@ public class CenterSpeed : IModSharpModule, IGameListener, IClientListener
         // Set visibility: only visible to the owning player
         foreach (var con in _entityManager.GetPlayerControllers(true))
         {
-            for (var i = 0; i < 4; i++)
+            for (var i = 0; i < HudParticleCapacity; i++)
             {
-                if (state.Digits[i] == null) continue;
+                var particle = state.Digits[i];
+                if (particle == null) continue;
                 bool shouldSee = (con.PlayerSlot == slot);
-                _transmitManager.SetEntityState(state.Digits[i].Index, con.Index, shouldSee, -1);
+                _transmitManager.SetEntityState(particle.Index, con.Index, shouldSee, -1);
             }
         }
 
@@ -282,10 +361,48 @@ public class CenterSpeed : IModSharpModule, IGameListener, IClientListener
         {
             if (particle == null || !particle.IsValid()) continue;
 
+            foreach (var con in _entityManager.GetPlayerControllers(true))
+            {
+                _transmitManager.SetEntityState(particle.Index, con.Index, false, -1);
+            }
+
             particle.AcceptInput("Stop");
             particle.AcceptInput("DestroyImmediately");
             particle.Active = false;
+
+            _modSharp.PushTimer(() =>
+            {
+                if (particle.IsValid())
+                    particle.Kill();
+            }, 0.1f);
         }
+    }
+
+    private int GetPlayerTimerTicks(int slot)
+    {
+        var ticks = _timerBaseTicks[slot];
+        if (_timerRunning[slot])
+        {
+            var now = _modSharp.GetGlobals().TickCount;
+            ticks += Math.Max(0, now - _timerStartTick[slot]);
+        }
+
+        return Math.Max(0, ticks);
+    }
+
+    private static int[] FormatTimerDigits(int ticks)
+    {
+        var totalSeconds = Math.Max(0, ticks) / 64;
+        var minutes = Math.Min(99, totalSeconds / 60);
+        var seconds = totalSeconds % 60;
+
+        return
+        [
+            minutes / 10,
+            minutes % 10,
+            seconds / 10,
+            seconds % 10
+        ];
     }
 
     // -------------------------------------------------------------------------
@@ -293,11 +410,22 @@ public class CenterSpeed : IModSharpModule, IGameListener, IClientListener
 
     private void PlayerRunCommandPost(IPlayerRunCommandHookParams param, HookReturnValue<EmptyHookReturn> retValue)
     {
-        if (_modSharp.GetGlobals().TickCount % 10 != 0)
+        SyncRuntimeConVars();
+
+        var slot = param.Client.Slot;
+        var mode = _displayModes[slot];
+        if (!_lettersTestEnabled && mode == HudDisplayMode.Speed)
+        {
+            mode = HudDisplayMode.TimerWidget;
+        }
+
+        var speedMode = !_lettersTestEnabled && mode == HudDisplayMode.Speed;
+        var updateTicks = speedMode ? 1 : Math.Clamp(_updateTicks, 1, 16);
+        if (_modSharp.GetGlobals().TickCount % updateTicks != 0)
             return;
 
         var client = param.Client;
-        var state = _huds[client.Slot];
+        var state = _huds[slot];
 
         if (client.GetPlayerController()?.Team < CStrikeTeam.TE)
         {
@@ -311,50 +439,94 @@ public class CenterSpeed : IModSharpModule, IGameListener, IClientListener
         if (controller == null || controller.ConnectedState != PlayerConnectedState.PlayerConnected)
             return;
 
-
-        var frameIndexes = new int[4];
+        var frameIndexes = new int[HudParticleCapacity];
+        var glyphPositions = new Vector[HudParticleCapacity];
+        var glyphCount = 0;
         var speed = 0;
-        var lettersTestEnabled = IsLettersTestEnabled();
+        var settings = _playerSettings[slot] ??= new PlayerHudSettings();
+        var lettersTestEnabled = _lettersTestEnabled;
 
         if (lettersTestEnabled)
         {
-            var startFrame = ParseConVarInt(_testLettersStartFrameConVar, 14, 0, 255);
-            var lettersCount = ParseConVarInt(_testLettersCountConVar, 9, 1, 64);
+            var lettersCount = Math.Max(1, _lettersCount);
             var phase = (_modSharp.GetGlobals().TickCount / 10) % lettersCount;
-            var frame = startFrame + phase;
-
+            glyphCount = 4;
             for (var i = 0; i < 4; i++)
             {
-                frameIndexes[i] = frame;
+                frameIndexes[i] = _lettersStartFrame + ((phase + i) % lettersCount);
+                glyphPositions[i] = GetGlyphPosition(i, glyphCount, HudDisplayMode.Speed, settings);
             }
         }
         else
         {
-            // Default to 0 so dead/spectating players show "0000".
-            var pawn = controller.GetPlayerPawn();
-
-            if (pawn != null)
+            switch (mode)
             {
-                var v = pawn.GetAbsVelocity().Length2D();
-                speed = (int)Math.Clamp(v, 0f, 9999f);
-            }
+                case HudDisplayMode.Timer:
+                {
+                    var timerDigits = FormatTimerDigits(GetPlayerTimerTicks(slot));
+                    glyphCount = 4;
+                    for (var i = 0; i < 4; i++)
+                    {
+                        frameIndexes[i] = _digitMap.GetValueOrDefault(timerDigits[i], 0);
+                        glyphPositions[i] = GetGlyphPosition(i, glyphCount, mode, settings);
+                    }
 
-            var digits = new int[4]
-            {
-                speed / 1000,
-                speed / 100  % 10,
-                speed / 10   % 10,
-                speed        % 10
-            };
+                    break;
+                }
+                case HudDisplayMode.Widget:
+                {
+                    BuildWidgetGlyphLayout(_widgetText[slot] ?? string.Empty, settings, frameIndexes, glyphPositions, out glyphCount);
 
-            for (var i = 0; i < 4; i++)
-            {
-                frameIndexes[i] = _digitMap.GetValueOrDefault(digits[i], 1);
+                    break;
+                }
+                case HudDisplayMode.TimerWidget:
+                {
+                    if (TryGetTimerWidgetText(slot, out var timerWidgetText))
+                    {
+                        BuildWidgetGlyphLayout(timerWidgetText, settings, frameIndexes, glyphPositions, out glyphCount);
+                    }
+                    else
+                    {
+                        BuildWidgetGlyphLayout(_widgetText[slot] ?? string.Empty, settings, frameIndexes, glyphPositions, out glyphCount);
+                    }
+
+                    break;
+                }
+                default:
+                {
+                    var pawn = controller.GetPlayerPawn();
+                    if (pawn != null)
+                    {
+                        var v = pawn.GetAbsVelocity().Length2D();
+                        speed = (int)Math.Clamp(v, 0f, 9999f);
+                    }
+
+                    var digits = new int[4]
+                    {
+                        speed / 1000,
+                        speed / 100  % 10,
+                        speed / 10   % 10,
+                        speed        % 10
+                    };
+                    glyphCount = 4;
+                    for (var i = 0; i < 4; i++)
+                    {
+                        frameIndexes[i] = _digitMap.GetValueOrDefault(digits[i], 0);
+                        glyphPositions[i] = GetGlyphPosition(i, glyphCount, mode, settings);
+                    }
+
+                    break;
+                }
             }
         }
 
-        // Update digit frames.
-        for (var i = 0; i < 4; i++)
+        // 0 = down(red), 1 = up(green), 2 = same(white), 3 = forced white (timer/widget/letters test).
+        var colorMode = lettersTestEnabled || mode == HudDisplayMode.Timer || mode == HudDisplayMode.Widget || mode == HudDisplayMode.TimerWidget
+            ? 3
+            : (_lastSpeed[slot] > speed ? 0 : (_lastSpeed[slot] < speed ? 1 : 2));
+
+        // Update visible glyphs.
+        for (var i = 0; i < glyphCount; i++)
         {
             var particle = state.Digits[i];
             if (particle == null || state.IsDisposed)
@@ -362,26 +534,62 @@ public class CenterSpeed : IModSharpModule, IGameListener, IClientListener
                 continue;
             }
 
-            SetControlPointValue(particle, 32, new Vector((float)frameIndexes[i], 0f, 0f));
-            if (lettersTestEnabled)
+            var pos = glyphPositions[i];
+            particle.DataControlPoint = 33;
+            particle.DataControlPointValue = pos;
+            SetControlPointValue(particle, 33, pos);
+
+            if (state.LastFrames[i] != frameIndexes[i])
             {
-                SetControlPointValue(particle, 16, new Vector(255f, 255f, 255f));
+                SetControlPointValue(particle, 32, new Vector((float)frameIndexes[i], 0f, 0f));
+                state.LastFrames[i] = frameIndexes[i];
             }
-            else if (_lastSpeed[client.Slot] > speed)
+
+            if (state.LastColorMode != colorMode)
             {
-                SetControlPointValue(particle, 16, new Vector(255f, 0f, 0f));
-            }
-            else if (_lastSpeed[client.Slot] < speed)
-            {
-                SetControlPointValue(particle, 16, new Vector(0f, 255f, 0f));
-            }
-            else
-            {
-                SetControlPointValue(particle, 16, new Vector(255f, 255f, 255f));
+                switch (colorMode)
+                {
+                    case 0:
+                        SetControlPointValue(particle, 16, new Vector(255f, 0f, 0f));
+                        break;
+                    case 1:
+                        SetControlPointValue(particle, 16, new Vector(0f, 255f, 0f));
+                        break;
+                    default:
+                        SetControlPointValue(particle, 16, new Vector(255f, 255f, 255f));
+                        break;
+                }
             }
         }
 
-        _lastSpeed[client.Slot] = speed;
+        // Hide old glyphs that are no longer used.
+        var hidePos = GetHiddenGlyphPosition(settings);
+        for (var i = glyphCount; i < state.ActiveGlyphCount; i++)
+        {
+            var particle = state.Digits[i];
+            if (particle == null || state.IsDisposed)
+            {
+                continue;
+            }
+
+            particle.DataControlPoint = 33;
+            particle.DataControlPointValue = hidePos;
+            SetControlPointValue(particle, 33, hidePos);
+
+            if (state.LastFrames[i] != 0)
+            {
+                SetControlPointValue(particle, 32, new Vector(0f, 0f, 0f));
+                state.LastFrames[i] = 0;
+            }
+        }
+
+        state.ActiveGlyphCount = glyphCount;
+        state.LastColorMode = colorMode;
+
+        if (!lettersTestEnabled && mode == HudDisplayMode.Speed)
+        {
+            _lastSpeed[slot] = speed;
+        }
     }
 
     // -------------------------------------------------------------------------
@@ -462,10 +670,305 @@ public class CenterSpeed : IModSharpModule, IGameListener, IClientListener
                 KillPlayerHud(client.Slot);
             client.GetPlayerController()?.Print(HudPrintChannel.Chat, $" [HUD] Enabled set to {settings.Enabled}");
         }
+        else if (sub == "letters")
+        {
+            if (command.ArgCount < 2)
+            {
+                client.GetPlayerController()?.Print(HudPrintChannel.Chat, " [HUD] Usage: !hud letters <on|off|start <0-255>|count <1-64>|ticks <1-16>|info>");
+                return ECommandAction.Stopped;
+            }
+
+            var mode = command.GetArg(2).ToLowerInvariant();
+            if (mode == "on")
+            {
+                _lettersTestEnabled = true;
+                client.GetPlayerController()?.Print(HudPrintChannel.Chat, " [HUD] Letters test enabled (A-Z frames 11-36)");
+            }
+            else if (mode == "off")
+            {
+                _lettersTestEnabled = false;
+                client.GetPlayerController()?.Print(HudPrintChannel.Chat, " [HUD] Letters test disabled");
+            }
+            else if (mode == "start" && command.ArgCount >= 3 && int.TryParse(command.GetArg(3), out var startFrame))
+            {
+                _lettersStartFrame = Math.Clamp(startFrame, 0, 255);
+                client.GetPlayerController()?.Print(HudPrintChannel.Chat, $" [HUD] Letters start frame set to {_lettersStartFrame}");
+            }
+            else if (mode == "count" && command.ArgCount >= 3 && int.TryParse(command.GetArg(3), out var count))
+            {
+                _lettersCount = Math.Clamp(count, 1, 64);
+                client.GetPlayerController()?.Print(HudPrintChannel.Chat, $" [HUD] Letters frame count set to {_lettersCount}");
+            }
+            else if (mode == "ticks" && command.ArgCount >= 3 && int.TryParse(command.GetArg(3), out var ticks))
+            {
+                _updateTicks = Math.Clamp(ticks, 1, 16);
+                client.GetPlayerController()?.Print(HudPrintChannel.Chat, $" [HUD] Update ticks set to {_updateTicks}");
+            }
+            else if (mode == "info")
+            {
+                client.GetPlayerController()?.Print(HudPrintChannel.Chat, $" [HUD] Letters: enabled={_lettersTestEnabled} start={_lettersStartFrame} count={_lettersCount} ticks={_updateTicks}");
+            }
+            else
+            {
+                client.GetPlayerController()?.Print(HudPrintChannel.Chat, " [HUD] Usage: !hud letters <on|off|start <0-255>|count <1-64>|ticks <1-16>|info>");
+            }
+        }
+        else if (sub == "digitmap")
+        {
+            if (command.ArgCount < 2)
+            {
+                client.GetPlayerController()?.Print(HudPrintChannel.Chat, " [HUD] Usage: !hud digitmap <0-9> <frame> | !hud digitmap info | !hud digitmap reset");
+                return ECommandAction.Stopped;
+            }
+
+            var arg2 = command.GetArg(2).ToLowerInvariant();
+            if (arg2 == "info")
+            {
+                client.GetPlayerController()?.Print(HudPrintChannel.Chat, $" [HUD] DigitMap: {FormatDigitMap()}");
+            }
+            else if (arg2 == "reset")
+            {
+                ResetDigitMap();
+                ForceHudRefresh(client.Slot);
+                client.GetPlayerController()?.Print(HudPrintChannel.Chat, $" [HUD] DigitMap reset: {FormatDigitMap()}");
+            }
+            else if (command.ArgCount >= 3
+                     && int.TryParse(command.GetArg(2), out var digit)
+                     && int.TryParse(command.GetArg(3), out var frame))
+            {
+                digit = Math.Clamp(digit, 0, 9);
+                frame = Math.Clamp(frame, 0, 255);
+                _digitMap[digit] = frame;
+                ForceHudRefresh(client.Slot);
+                client.GetPlayerController()?.Print(HudPrintChannel.Chat, $" [HUD] DigitMap {digit} -> {frame}");
+            }
+            else
+            {
+                client.GetPlayerController()?.Print(HudPrintChannel.Chat, " [HUD] Usage: !hud digitmap <0-9> <frame> | !hud digitmap info | !hud digitmap reset");
+            }
+        }
+        else if (sub == "mode")
+        {
+            if (command.ArgCount < 2)
+            {
+                client.GetPlayerController()?.Print(HudPrintChannel.Chat, " [HUD] Usage: !hud mode <speed|timer|widget|timerwidget>");
+                return ECommandAction.Stopped;
+            }
+
+            var modeArg = command.GetArg(2).ToLowerInvariant();
+            if (modeArg == "speed")
+            {
+                _displayModes[slot] = HudDisplayMode.Speed;
+                ForceHudRefresh(slot);
+                client.GetPlayerController()?.Print(HudPrintChannel.Chat, " [HUD] Mode set to speed");
+            }
+            else if (modeArg == "timer")
+            {
+                _displayModes[slot] = HudDisplayMode.Timer;
+                ForceHudRefresh(slot);
+                client.GetPlayerController()?.Print(HudPrintChannel.Chat, " [HUD] Mode set to timer (MMSS)");
+            }
+            else if (modeArg == "widget")
+            {
+                _displayModes[slot] = HudDisplayMode.Widget;
+                ForceHudRefresh(slot);
+                client.GetPlayerController()?.Print(HudPrintChannel.Chat, " [HUD] Mode set to widget");
+            }
+            else if (modeArg == "timerwidget" || modeArg == "timerhud")
+            {
+                _displayModes[slot] = HudDisplayMode.TimerWidget;
+                ForceHudRefresh(slot);
+                client.GetPlayerController()?.Print(HudPrintChannel.Chat, " [HUD] Mode set to timerwidget");
+            }
+            else
+            {
+                client.GetPlayerController()?.Print(HudPrintChannel.Chat, " [HUD] Usage: !hud mode <speed|timer|widget|timerwidget>");
+            }
+        }
+        else if (sub == "widget")
+        {
+            if (command.ArgCount < 2)
+            {
+                client.GetPlayerController()?.Print(HudPrintChannel.Chat, " [HUD] Usage: !hud widget <set <text...>|line <1-5> <text...>|clear|mode|info>");
+                return ECommandAction.Stopped;
+            }
+
+            var widgetArg = command.GetArg(2).ToLowerInvariant();
+            if (widgetArg == "set")
+            {
+                var text = NormalizeWidgetText(JoinCommandArgs(command, 3));
+                if (string.IsNullOrWhiteSpace(text))
+                {
+                    client.GetPlayerController()?.Print(HudPrintChannel.Chat, " [HUD] Usage: !hud widget set <text...>");
+                    return ECommandAction.Stopped;
+                }
+
+                _widgetText[slot] = text.ToUpperInvariant();
+                _displayModes[slot] = HudDisplayMode.Widget;
+                ForceHudRefresh(slot);
+                client.GetPlayerController()?.Print(HudPrintChannel.Chat, $" [HUD] Widget text set ({GetWidgetVisibleCharCount(_widgetText[slot])} chars)");
+            }
+            else if (widgetArg == "line")
+            {
+                if (command.ArgCount < 4 || !int.TryParse(command.GetArg(3), out var line))
+                {
+                    client.GetPlayerController()?.Print(HudPrintChannel.Chat, " [HUD] Usage: !hud widget line <1-5> <text...>");
+                    return ECommandAction.Stopped;
+                }
+
+                var lineText = NormalizeWidgetText(JoinCommandArgs(command, 4));
+                if (lineText.Contains('\n'))
+                {
+                    lineText = lineText.Replace("\n", " ");
+                }
+
+                _widgetText[slot] = SetWidgetLine(_widgetText[slot] ?? string.Empty, Math.Clamp(line, 1, WidgetMaxLines) - 1, lineText.ToUpperInvariant());
+                _displayModes[slot] = HudDisplayMode.Widget;
+                ForceHudRefresh(slot);
+                client.GetPlayerController()?.Print(HudPrintChannel.Chat, $" [HUD] Widget line {Math.Clamp(line, 1, WidgetMaxLines)} set");
+            }
+            else if (widgetArg == "clear")
+            {
+                _widgetText[slot] = string.Empty;
+                ForceHudRefresh(slot);
+                client.GetPlayerController()?.Print(HudPrintChannel.Chat, " [HUD] Widget text cleared");
+            }
+            else if (widgetArg == "mode")
+            {
+                _displayModes[slot] = HudDisplayMode.Widget;
+                ForceHudRefresh(slot);
+                client.GetPlayerController()?.Print(HudPrintChannel.Chat, " [HUD] Mode set to widget");
+            }
+            else if (widgetArg == "info")
+            {
+                client.GetPlayerController()?.Print(HudPrintChannel.Chat, $" [HUD] Widget: chars={GetWidgetVisibleCharCount(_widgetText[slot])} lines={GetWidgetLineCount(_widgetText[slot])} text='{(_widgetText[slot] ?? string.Empty).Replace('\n', '|')}'");
+            }
+            else
+            {
+                client.GetPlayerController()?.Print(HudPrintChannel.Chat, " [HUD] Usage: !hud widget <set <text...>|line <1-5> <text...>|clear|mode|info>");
+            }
+        }
+        else if (sub == "timer")
+        {
+            if (command.ArgCount < 2)
+            {
+                client.GetPlayerController()?.Print(HudPrintChannel.Chat, " [HUD] Usage: !hud timer <start|stop|reset|info>");
+                return ECommandAction.Stopped;
+            }
+
+            var timerArg = command.GetArg(2).ToLowerInvariant();
+            if (timerArg == "start")
+            {
+                if (!_timerRunning[slot])
+                {
+                    _timerRunning[slot] = true;
+                    _timerStartTick[slot] = _modSharp.GetGlobals().TickCount;
+                }
+                _displayModes[slot] = HudDisplayMode.Timer;
+                ForceHudRefresh(slot);
+                client.GetPlayerController()?.Print(HudPrintChannel.Chat, " [HUD] Timer started");
+            }
+            else if (timerArg == "stop")
+            {
+                if (_timerRunning[slot])
+                {
+                    var now = _modSharp.GetGlobals().TickCount;
+                    _timerBaseTicks[slot] += Math.Max(0, now - _timerStartTick[slot]);
+                    _timerRunning[slot] = false;
+                }
+                ForceHudRefresh(slot);
+                client.GetPlayerController()?.Print(HudPrintChannel.Chat, " [HUD] Timer stopped");
+            }
+            else if (timerArg == "reset")
+            {
+                _timerBaseTicks[slot] = 0;
+                _timerStartTick[slot] = _modSharp.GetGlobals().TickCount;
+                ForceHudRefresh(slot);
+                client.GetPlayerController()?.Print(HudPrintChannel.Chat, " [HUD] Timer reset");
+            }
+            else if (timerArg == "info")
+            {
+                var ticks = GetPlayerTimerTicks(slot);
+                var digits = FormatTimerDigits(ticks);
+                client.GetPlayerController()?.Print(
+                    HudPrintChannel.Chat,
+                    $" [HUD] Timer: running={_timerRunning[slot]} ticks={ticks} mmss={digits[0]}{digits[1]}{digits[2]}{digits[3]}"
+                );
+            }
+            else
+            {
+                client.GetPlayerController()?.Print(HudPrintChannel.Chat, " [HUD] Usage: !hud timer <start|stop|reset|info>");
+            }
+        }
         else
         {
-            client.GetPlayerController()?.Print(HudPrintChannel.Chat, " [HUD] Subcommands: offset <1-4> <-10..10> | scale <0-10> | yoffset <-10-10> | info");
+            client.GetPlayerController()?.Print(HudPrintChannel.Chat, " [HUD] Subcommands: toggle | offset <1-4> <-10..10> | scale <0-10> | yoffset <-10-10> | mode <speed|timer|widget|timerwidget> | timer <...> | widget <...> | letters <...> | digitmap <...> | info");
         }
+        return ECommandAction.Stopped;
+    }
+
+    private ECommandAction OnWidgetSetCommand(IGameClient client, StringCommand command)
+    {
+        var slot = client.Slot;
+        var text = NormalizeWidgetText(JoinCommandArgs(command, 2));
+        if (string.IsNullOrWhiteSpace(text))
+        {
+            client.GetPlayerController()?.Print(HudPrintChannel.Chat, " [HUD] Usage: ms_cspeed_widget_set <text...>");
+            return ECommandAction.Stopped;
+        }
+
+        _widgetText[slot] = text.ToUpperInvariant();
+        _displayModes[slot] = HudDisplayMode.Widget;
+        ForceHudRefresh(slot);
+        return ECommandAction.Stopped;
+    }
+
+    private ECommandAction OnWidgetSetLineCommand(IGameClient client, StringCommand command)
+    {
+        var slot = client.Slot;
+        if (command.ArgCount < 2 || !int.TryParse(command.GetArg(2), out var line))
+        {
+            client.GetPlayerController()?.Print(HudPrintChannel.Chat, " [HUD] Usage: ms_cspeed_widget_setline <1-5> <text...>");
+            return ECommandAction.Stopped;
+        }
+
+        var lineText = NormalizeWidgetText(JoinCommandArgs(command, 3));
+        if (lineText.Contains('\n'))
+        {
+            lineText = lineText.Replace("\n", " ");
+        }
+
+        _widgetText[slot] = SetWidgetLine(_widgetText[slot] ?? string.Empty, Math.Clamp(line, 1, WidgetMaxLines) - 1, lineText.ToUpperInvariant());
+        _displayModes[slot] = HudDisplayMode.Widget;
+        ForceHudRefresh(slot);
+        return ECommandAction.Stopped;
+    }
+
+    private ECommandAction OnWidgetClearCommand(IGameClient client, StringCommand command)
+    {
+        _widgetText[client.Slot] = string.Empty;
+        ForceHudRefresh(client.Slot);
+        return ECommandAction.Stopped;
+    }
+
+    private ECommandAction OnWidgetClearLineCommand(IGameClient client, StringCommand command)
+    {
+        var slot = client.Slot;
+        if (command.ArgCount < 2 || !int.TryParse(command.GetArg(2), out var line))
+        {
+            client.GetPlayerController()?.Print(HudPrintChannel.Chat, " [HUD] Usage: ms_cspeed_widget_clearline <1-5>");
+            return ECommandAction.Stopped;
+        }
+
+        _widgetText[slot] = SetWidgetLine(_widgetText[slot] ?? string.Empty, Math.Clamp(line, 1, WidgetMaxLines) - 1, string.Empty);
+        ForceHudRefresh(slot);
+        return ECommandAction.Stopped;
+    }
+
+    private ECommandAction OnWidgetModeCommand(IGameClient client, StringCommand command)
+    {
+        _displayModes[client.Slot] = HudDisplayMode.Widget;
+        ForceHudRefresh(client.Slot);
         return ECommandAction.Stopped;
     }
 
@@ -475,6 +978,11 @@ public class CenterSpeed : IModSharpModule, IGameListener, IClientListener
         client.GetPlayerController()?.Print(HudPrintChannel.Chat, $" [HUD] Offsets: 1={o[0]:F2}  2={o[1]:F2}  3={o[2]:F2}  4={o[3]:F2}");
         client.GetPlayerController()?.Print(HudPrintChannel.Chat, $" [HUD] Scale: {settings.HudScale:F4}");
         client.GetPlayerController()?.Print(HudPrintChannel.Chat, $" [HUD] Y-Offset: {settings.YOffset:F4}");
+        client.GetPlayerController()?.Print(HudPrintChannel.Chat, $" [HUD] Mode: {_displayModes[client.Slot]}");
+        client.GetPlayerController()?.Print(HudPrintChannel.Chat, $" [HUD] Timer: running={_timerRunning[client.Slot]} ticks={GetPlayerTimerTicks(client.Slot)}");
+        client.GetPlayerController()?.Print(HudPrintChannel.Chat, $" [HUD] Letters: enabled={_lettersTestEnabled} start={_lettersStartFrame} count={_lettersCount} ticks={_updateTicks}");
+        client.GetPlayerController()?.Print(HudPrintChannel.Chat, $" [HUD] Widget: chars={GetWidgetVisibleCharCount(_widgetText[client.Slot])} lines={GetWidgetLineCount(_widgetText[client.Slot])} text='{(_widgetText[client.Slot] ?? string.Empty).Replace('\n', '|')}'");
+        client.GetPlayerController()?.Print(HudPrintChannel.Chat, $" [HUD] DigitMap: {FormatDigitMap()}");
     }
 
     // -------------------------------------------------------------------------
@@ -485,20 +993,30 @@ public class CenterSpeed : IModSharpModule, IGameListener, IClientListener
         _cachedInterface = _modules.GetOptionalSharpModuleInterface<IClientPreference>(IClientPreference.Identity);
         if (_cachedInterface?.Instance is { } instance)
             _callback = instance.ListenOnLoad(OnCookieLoad);
+
+        _timerHudFeedInterface = _modules.GetOptionalSharpModuleInterface<ITimerHudFeed>(ITimerHudFeed.Identity);
     }
 
     public void OnLibraryConnected(string name)
     {
-        if (!name.Equals("ClientPreferences")) return;
-        _cachedInterface = _modules.GetRequiredSharpModuleInterface<IClientPreference>(IClientPreference.Identity);
-        if (_cachedInterface?.Instance is { } instance)
-            _callback = instance.ListenOnLoad(OnCookieLoad);
+        if (name.Equals("ClientPreferences"))
+        {
+            _cachedInterface = _modules.GetRequiredSharpModuleInterface<IClientPreference>(IClientPreference.Identity);
+            if (_cachedInterface?.Instance is { } instance)
+                _callback = instance.ListenOnLoad(OnCookieLoad);
+        }
+
+        if (name.Equals(ITimerHudFeed.Identity))
+            _timerHudFeedInterface = _modules.GetOptionalSharpModuleInterface<ITimerHudFeed>(ITimerHudFeed.Identity);
     }
 
     public void OnLibraryDisconnect(string name)
     {
-        if (!name.Equals("ClientPreferences")) return;
-        _cachedInterface = null;
+        if (name.Equals("ClientPreferences"))
+            _cachedInterface = null;
+
+        if (name.Equals(ITimerHudFeed.Identity))
+            _timerHudFeedInterface = null;
     }
 
     private IClientPreference? GetInterface()
@@ -510,6 +1028,21 @@ public class CenterSpeed : IModSharpModule, IGameListener, IClientListener
                 _callback = instance.ListenOnLoad(OnCookieLoad);
         }
         return _cachedInterface?.Instance;
+    }
+
+    private ITimerHudFeed? GetTimerHudFeed()
+    {
+        if (_timerHudFeedInterface?.Instance is null)
+            _timerHudFeedInterface = _modules.GetOptionalSharpModuleInterface<ITimerHudFeed>(ITimerHudFeed.Identity);
+
+        return _timerHudFeedInterface?.Instance;
+    }
+
+    private bool TryGetTimerWidgetText(int slot, out string text)
+    {
+        text = string.Empty;
+        var feed = GetTimerHudFeed();
+        return feed != null && feed.TryGetWidgetText(slot, out text) && !string.IsNullOrWhiteSpace(text);
     }
 
     private void OnCookieLoad(IGameClient client)
@@ -561,6 +1094,170 @@ public class CenterSpeed : IModSharpModule, IGameListener, IClientListener
     // -------------------------------------------------------------------------
     // Helpers
 
+    private void SyncRuntimeConVars()
+    {
+        if (_testLettersConVar != null && int.TryParse(_testLettersConVar.GetString(), out var lettersEnabled))
+        {
+            _lettersTestEnabled = lettersEnabled != 0;
+        }
+
+        if (_testLettersStartFrameConVar != null && int.TryParse(_testLettersStartFrameConVar.GetString(), out var startFrame))
+        {
+            _lettersStartFrame = Math.Clamp(startFrame, 0, 255);
+        }
+
+        if (_testLettersCountConVar != null && int.TryParse(_testLettersCountConVar.GetString(), out var count))
+        {
+            _lettersCount = Math.Clamp(count, 1, 64);
+        }
+
+        if (_updateTicksConVar != null && int.TryParse(_updateTicksConVar.GetString(), out var ticks))
+        {
+            _updateTicks = Math.Clamp(ticks, 1, 16);
+        }
+    }
+
+    private Vector GetHiddenGlyphPosition(PlayerHudSettings settings)
+    {
+        return new Vector(0f, settings.YOffset - 20f, 0f);
+    }
+
+    private Vector GetGlyphPosition(int index, int glyphCount, HudDisplayMode mode, PlayerHudSettings settings)
+    {
+        if (mode == HudDisplayMode.Widget)
+        {
+            var startX = -((glyphCount - 1) * WidgetCharSpacing * 0.5f);
+            var x = startX + (index * WidgetCharSpacing);
+            return new Vector(x, settings.YOffset, 0f);
+        }
+
+        // Speed/timer are fixed to 4-digit offsets for backwards compatibility.
+        var offsetIndex = Math.Clamp(index, 0, settings.DigitOffsets.Length - 1);
+        return new Vector(settings.DigitOffsets[offsetIndex], settings.YOffset, 0f);
+    }
+
+    private void BuildWidgetGlyphLayout(
+        string text,
+        PlayerHudSettings settings,
+        int[] frames,
+        Vector[] positions,
+        out int glyphCount)
+    {
+        glyphCount = 0;
+        if (string.IsNullOrEmpty(text))
+        {
+            return;
+        }
+
+        var normalized = NormalizeWidgetText(text).ToUpperInvariant();
+        var lines = normalized.Split('\n')
+            .Take(WidgetMaxLines)
+            .Select(l => l.Length > HudParticleCapacity ? l[..HudParticleCapacity] : l)
+            .ToArray();
+
+        var nonEmptyLines = lines.Length == 0 ? 1 : lines.Length;
+        var topY = settings.YOffset + ((nonEmptyLines - 1) * WidgetLineSpacing * 0.5f);
+
+        for (var lineIndex = 0; lineIndex < lines.Length; lineIndex++)
+        {
+            var line = lines[lineIndex];
+            if (line.Length == 0)
+            {
+                continue;
+            }
+
+            var startX = -((line.Length - 1) * WidgetCharSpacing * 0.5f);
+            var lineY = topY - (lineIndex * WidgetLineSpacing);
+
+            for (var charIndex = 0; charIndex < line.Length && glyphCount < HudParticleCapacity; charIndex++)
+            {
+                frames[glyphCount] = MapGlyphFrame(line[charIndex]);
+                positions[glyphCount] = new Vector(startX + (charIndex * WidgetCharSpacing), lineY, 0f);
+                glyphCount++;
+            }
+        }
+    }
+
+    private int MapGlyphFrame(char c)
+    {
+        if (char.IsDigit(c))
+        {
+            return _digitMap.GetValueOrDefault(c - '0', 0);
+        }
+
+        if (char.IsLetter(c))
+        {
+            var upper = char.ToUpperInvariant(c);
+            return 11 + (upper - 'A');
+        }
+
+        return _glyphMap.GetValueOrDefault(c, 0);
+    }
+
+    private static string NormalizeWidgetText(string text)
+    {
+        if (string.IsNullOrEmpty(text))
+        {
+            return string.Empty;
+        }
+
+        return text.Replace("\\n", "\n").Replace("\r", string.Empty);
+    }
+
+    private static int GetWidgetVisibleCharCount(string? text)
+    {
+        if (string.IsNullOrEmpty(text))
+        {
+            return 0;
+        }
+
+        return text.Count(c => c != '\n' && c != '\r');
+    }
+
+    private static int GetWidgetLineCount(string? text)
+    {
+        if (string.IsNullOrEmpty(text))
+        {
+            return 0;
+        }
+
+        return NormalizeWidgetText(text).Split('\n').Length;
+    }
+
+    private static string SetWidgetLine(string source, int lineIndex, string lineValue)
+    {
+        var lines = NormalizeWidgetText(source).Split('\n').ToList();
+        while (lines.Count <= lineIndex)
+        {
+            lines.Add(string.Empty);
+        }
+
+        lines[lineIndex] = lineValue;
+
+        while (lines.Count > 0 && string.IsNullOrEmpty(lines[^1]))
+        {
+            lines.RemoveAt(lines.Count - 1);
+        }
+
+        return string.Join("\n", lines);
+    }
+
+    private static string JoinCommandArgs(StringCommand command, int startIndex)
+    {
+        if (command.ArgCount < startIndex)
+        {
+            return string.Empty;
+        }
+
+        var parts = new List<string>();
+        for (var i = startIndex; i <= command.ArgCount; i++)
+        {
+            parts.Add(command.GetArg(i));
+        }
+
+        return string.Join(" ", parts).Trim();
+    }
+
     private bool SetControlPointValue(IBaseParticle particle, int cpIndex, Vector value)
     {
         var assignments = particle.GetServerControlPointAssignments();
@@ -580,47 +1277,69 @@ public class CenterSpeed : IModSharpModule, IGameListener, IClientListener
         return false;
     }
 
-    private bool IsLettersTestEnabled()
-    {
-        var raw = _testLettersConVar?.GetString();
-        if (string.IsNullOrWhiteSpace(raw))
-            return false;
-
-        return raw.Equals("1", StringComparison.OrdinalIgnoreCase)
-            || raw.Equals("true", StringComparison.OrdinalIgnoreCase)
-            || raw.Equals("yes", StringComparison.OrdinalIgnoreCase)
-            || raw.Equals("on", StringComparison.OrdinalIgnoreCase);
-    }
-
-    private int ParseConVarInt(IConVar? conVar, int fallback, int min, int max)
-    {
-        if (conVar == null)
-            return fallback;
-
-        if (!int.TryParse(conVar.GetString(), out var value))
-            return fallback;
-
-        return Math.Clamp(value, min, max);
-    }
-
     private void ApplySettingsToHud(int slot, PlayerHudSettings settings)
     {
         var state = _huds[slot];
         if (state == null || state.IsDisposed)
             return;
 
-        for (var i = 0; i < 4; i++)
+        var mode = _displayModes[slot];
+        var glyphCount = 4;
+        var glyphPositions = new Vector[HudParticleCapacity];
+        if (mode == HudDisplayMode.Widget)
+        {
+            var scratchFrames = new int[HudParticleCapacity];
+            BuildWidgetGlyphLayout(_widgetText[slot] ?? string.Empty, settings, scratchFrames, glyphPositions, out glyphCount);
+        }
+
+        for (var i = 0; i < HudParticleCapacity; i++)
         {
             var particle = state.Digits[i];
             if (particle == null || !particle.IsValid())
                 continue;
 
-            var cp33 = new Vector(settings.DigitOffsets[i], settings.YOffset, 0f);
+            var cp33 = i < glyphCount
+                ? (mode == HudDisplayMode.Widget ? glyphPositions[i] : GetGlyphPosition(i, glyphCount, mode, settings))
+                : GetHiddenGlyphPosition(settings);
+
             particle.DataControlPoint = 33;
             particle.DataControlPointValue = cp33;
             SetControlPointValue(particle, 33, cp33);
             SetControlPointValue(particle, 34, new Vector(settings.HudScale, 0f, 0f));
         }
+    }
+
+    private void ForceHudRefresh(int slot)
+    {
+        var state = _huds[slot];
+        if (state == null || state.IsDisposed)
+            return;
+
+        for (var i = 0; i < state.LastFrames.Length; i++)
+            state.LastFrames[i] = -1;
+        state.LastColorMode = -1;
+    }
+
+    private string FormatDigitMap()
+    {
+        return string.Join(" ", Enumerable.Range(0, 10).Select(d => $"{d}={_digitMap.GetValueOrDefault(d, 0)}"));
+    }
+
+    private void ResetDigitMap()
+    {
+        _digitMap = new Dictionary<int, int>
+        {
+            [0] = 1,
+            [1] = 2,
+            [2] = 3,
+            [3] = 4,
+            [4] = 5,
+            [5] = 6,
+            [6] = 7,
+            [7] = 8,
+            [8] = 9,
+            [9] = 10,
+        };
     }
     public void OnResourcePrecache()
     {

@@ -164,7 +164,7 @@ public class CenterSpeed : IModSharpModule, IGameListener, IClientListener
         _sharedSystem.GetModSharp().InstallGameListener(this);
 
         var convarManager = _sharedSystem.GetConVarManager();
-        _particleConVar = convarManager.CreateConVar("ms_cspeed_particle", "particles/numbers/number_x.vpcf");
+        _particleConVar = convarManager.CreateConVar("ms_cspeed_particle", "particles/digits_x/digits_x.vpcf");
         _testLettersConVar = convarManager.CreateConVar("ms_cspeed_test_letters", "0");
         _testLettersStartFrameConVar = convarManager.CreateConVar("ms_cspeed_test_letters_start", "14");
         _testLettersCountConVar = convarManager.CreateConVar("ms_cspeed_test_letters_count", "9");
@@ -295,7 +295,7 @@ public class CenterSpeed : IModSharpModule, IGameListener, IClientListener
 
         if (!settings.Enabled) return;
 
-        var particleName = _particleConVar?.GetString() ?? "particles/numbers/number_x.vpcf";
+        var particleName = _particleConVar?.GetString() ?? "particles/digits_x/digits_x.vpcf";
 
 
         for (var i = 0; i < HudParticleCapacity; i++)

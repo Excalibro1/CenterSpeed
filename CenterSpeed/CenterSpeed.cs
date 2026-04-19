@@ -15,7 +15,7 @@ namespace CenterSpeed;
 
 public class CenterSpeed : IModSharpModule, IGameListener, IClientListener
 {
-    private const string BuildTag = "cs-build-20260420a";
+    private const string BuildTag = "BUILD_MARKER_20260420A";
     private const int HudParticleCapacity = 64;
     // Wider spacing for world-space particle text readability.
     private const float WidgetCharSpacing = 1.35f;
@@ -179,7 +179,7 @@ public class CenterSpeed : IModSharpModule, IGameListener, IClientListener
         _clientManager.InstallCommandCallback("ms_cspeed_widget_clearline", OnWidgetClearLineCommand);
         _clientManager.InstallCommandCallback("ms_cspeed_widget_mode", OnWidgetModeCommand);
 
-        _logger.LogInformation("CenterSpeed loaded ({BuildTag}, letters control via !hud letters ...)", BuildTag);
+        _logger.LogInformation("CenterSpeed loaded BUILD_MARKER_20260420A (letters control via !hud letters ...)");
 
         _hookManager.PlayerRunCommand.InstallHookPost(PlayerRunCommandPost);
         _hookManager.PlayerSpawnPost.InstallForward(OnPlayerSpawned);

@@ -16,8 +16,9 @@ namespace CenterSpeed;
 public class CenterSpeed : IModSharpModule, IGameListener, IClientListener
 {
     private const int HudParticleCapacity = 64;
-    private const float WidgetCharSpacing = 0.22f;
-    private const float WidgetLineSpacing = 0.26f;
+    // Match legacy digit spread so widget text isn't visually stacked.
+    private const float WidgetCharSpacing = 0.95f;
+    private const float WidgetLineSpacing = 1.10f;
     private const int WidgetMaxLines = 5;
 
     private enum HudDisplayMode
@@ -414,10 +415,6 @@ public class CenterSpeed : IModSharpModule, IGameListener, IClientListener
 
         var slot = param.Client.Slot;
         var mode = _displayModes[slot];
-        if (!_lettersTestEnabled && mode == HudDisplayMode.Speed)
-        {
-            mode = HudDisplayMode.TimerWidget;
-        }
 
         var speedMode = !_lettersTestEnabled && mode == HudDisplayMode.Speed;
         var updateTicks = speedMode ? 1 : Math.Clamp(_updateTicks, 1, 16);

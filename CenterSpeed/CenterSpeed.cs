@@ -16,9 +16,9 @@ namespace CenterSpeed;
 public class CenterSpeed : IModSharpModule, IGameListener, IClientListener
 {
     private const int HudParticleCapacity = 64;
-    // Match legacy digit spread so widget text isn't visually stacked.
-    private const float WidgetCharSpacing = 0.95f;
-    private const float WidgetLineSpacing = 1.10f;
+    // Wider spacing for world-space particle text readability.
+    private const float WidgetCharSpacing = 1.35f;
+    private const float WidgetLineSpacing = 1.55f;
     private const int WidgetMaxLines = 5;
 
     private enum HudDisplayMode
@@ -67,59 +67,58 @@ public class CenterSpeed : IModSharpModule, IGameListener, IClientListener
     private IConVar? _testLettersCountConVar;
     private IConVar? _updateTicksConVar;
     private bool _lettersTestEnabled = false;
-    private int _lettersStartFrame = 11;
+    private int _lettersStartFrame = 10;
     private int _lettersCount = 26;
     private int _updateTicks = 2;
 
     private Dictionary<int, int> _digitMap = new()
     {
-        [0] = 1,
-        [1] = 2,
-        [2] = 3,
-        [3] = 4,
-        [4] = 5,
-        [5] = 6,
-        [6] = 7,
-        [7] = 8,
-        [8] = 9,
-        [9] = 10,
+        [0] = 0,
+        [1] = 1,
+        [2] = 2,
+        [3] = 3,
+        [4] = 4,
+        [5] = 5,
+        [6] = 6,
+        [7] = 7,
+        [8] = 8,
+        [9] = 9,
     };
 
     private readonly Dictionary<char, int> _glyphMap = new()
     {
-        [' '] = 0,
-        ['.'] = 37,
-        [','] = 38,
-        [':'] = 39,
-        [';'] = 40,
-        ['+'] = 41,
-        ['-'] = 42,
-        ['*'] = 43,
-        ['/'] = 44,
-        ['='] = 45,
-        ['%'] = 46,
-        ['('] = 47,
-        [')'] = 48,
-        ['['] = 49,
-        [']'] = 50,
-        ['{'] = 51,
-        ['}'] = 52,
-        ['<'] = 53,
-        ['>'] = 54,
-        ['!'] = 55,
-        ['?'] = 56,
-        ['@'] = 57,
-        ['#'] = 58,
-        ['$'] = 59,
-        ['^'] = 60,
-        ['&'] = 61,
-        ['_'] = 62,
-        ['\\'] = 63,
-        ['|'] = 64,
-        ['"'] = 65,
-        ['\''] = 66,
-        ['`'] = 67,
-        ['~'] = 68
+        ['.'] = 36,
+        [','] = 37,
+        [':'] = 38,
+        [';'] = 39,
+        ['+'] = 40,
+        ['-'] = 41,
+        ['*'] = 42,
+        ['/'] = 43,
+        ['='] = 44,
+        ['%'] = 45,
+        ['('] = 46,
+        [')'] = 47,
+        ['['] = 48,
+        [']'] = 49,
+        ['{'] = 50,
+        ['}'] = 51,
+        ['<'] = 52,
+        ['>'] = 53,
+        ['!'] = 54,
+        ['?'] = 55,
+        ['@'] = 56,
+        ['#'] = 57,
+        ['$'] = 58,
+        ['^'] = 59,
+        ['&'] = 60,
+        ['_'] = 61,
+        ['\\'] = 62,
+        ['|'] = 63,
+        ['"'] = 64,
+        ['\''] = 65,
+        ['`'] = 66,
+        ['~'] = 67
     };
 
     private class PlayerHudSettings
@@ -485,27 +484,15 @@ public class CenterSpeed : IModSharpModule, IGameListener, IClientListener
                     else
                     {
                         // Timer feed may be temporarily unavailable on join/map change.
-                        // Fall back to live speed digits so HUD never disappears.
+                        // Fall back to explicit text so HUD never appears blank.
                         var pawn = controller.GetPlayerPawn();
                         if (pawn != null)
                         {
                             var v = pawn.GetAbsVelocity().Length2D();
                             speed = (int)Math.Clamp(v, 0f, 9999f);
                         }
-
-                        var digits = new int[4]
-                        {
-                            speed / 1000,
-                            speed / 100  % 10,
-                            speed / 10   % 10,
-                            speed        % 10
-                        };
-                        glyphCount = 4;
-                        for (var i = 0; i < 4; i++)
-                        {
-                            frameIndexes[i] = _digitMap.GetValueOrDefault(digits[i], 0);
-                            glyphPositions[i] = GetGlyphPosition(i, glyphCount, HudDisplayMode.Speed, settings);
-                        }
+                        
+                        BuildWidgetGlyphLayout($"SPD {speed:0000}", settings, frameIndexes, glyphPositions, out glyphCount);
                     }
 
                     break;
@@ -1000,6 +987,7 @@ public class CenterSpeed : IModSharpModule, IGameListener, IClientListener
         client.GetPlayerController()?.Print(HudPrintChannel.Chat, $" [HUD] Timer: running={_timerRunning[client.Slot]} ticks={GetPlayerTimerTicks(client.Slot)}");
         client.GetPlayerController()?.Print(HudPrintChannel.Chat, $" [HUD] Letters: enabled={_lettersTestEnabled} start={_lettersStartFrame} count={_lettersCount} ticks={_updateTicks}");
         client.GetPlayerController()?.Print(HudPrintChannel.Chat, $" [HUD] Widget: chars={GetWidgetVisibleCharCount(_widgetText[client.Slot])} lines={GetWidgetLineCount(_widgetText[client.Slot])} text='{(_widgetText[client.Slot] ?? string.Empty).Replace('\n', '|')}'");
+        client.GetPlayerController()?.Print(HudPrintChannel.Chat, $" [HUD] TimerWidgetFeed: hasText={TryGetTimerWidgetText(client.Slot, out _)}");
         client.GetPlayerController()?.Print(HudPrintChannel.Chat, $" [HUD] DigitMap: {FormatDigitMap()}");
     }
 
@@ -1189,27 +1177,43 @@ public class CenterSpeed : IModSharpModule, IGameListener, IClientListener
 
             for (var charIndex = 0; charIndex < line.Length && glyphCount < HudParticleCapacity; charIndex++)
             {
-                frames[glyphCount] = MapGlyphFrame(line[charIndex]);
-                positions[glyphCount] = new Vector(startX + (charIndex * WidgetCharSpacing), lineY, 0f);
-                glyphCount++;
+                if (TryMapGlyphFrame(line[charIndex], out var frame))
+                {
+                    frames[glyphCount] = frame;
+                    positions[glyphCount] = new Vector(startX + (charIndex * WidgetCharSpacing), lineY, 0f);
+                    glyphCount++;
+                }
             }
         }
     }
 
-    private int MapGlyphFrame(char c)
+    private bool TryMapGlyphFrame(char c, out int frame)
     {
+        frame = 0;
+        if (c == ' ')
+        {
+            return false;
+        }
+
         if (char.IsDigit(c))
         {
-            return _digitMap.GetValueOrDefault(c - '0', 0);
+            frame = _digitMap.GetValueOrDefault(c - '0', 0);
+            return true;
         }
 
         if (char.IsLetter(c))
         {
             var upper = char.ToUpperInvariant(c);
-            return 11 + (upper - 'A');
+            frame = 10 + (upper - 'A');
+            return true;
         }
 
-        return _glyphMap.GetValueOrDefault(c, 0);
+        if (_glyphMap.TryGetValue(c, out frame))
+        {
+            return true;
+        }
+
+        return false;
     }
 
     private static string NormalizeWidgetText(string text)

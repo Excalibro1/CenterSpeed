@@ -67,58 +67,59 @@ public class CenterSpeed : IModSharpModule, IGameListener, IClientListener
     private IConVar? _testLettersCountConVar;
     private IConVar? _updateTicksConVar;
     private bool _lettersTestEnabled = false;
-    private int _lettersStartFrame = 10;
+    private int _lettersStartFrame = 14;
     private int _lettersCount = 26;
     private int _updateTicks = 2;
 
     private Dictionary<int, int> _digitMap = new()
     {
-        [0] = 0,
-        [1] = 1,
-        [2] = 2,
-        [3] = 3,
-        [4] = 4,
-        [5] = 5,
-        [6] = 6,
-        [7] = 7,
-        [8] = 8,
-        [9] = 9,
+        [0] = 1,
+        [1] = 2,
+        [2] = 3,
+        [3] = 4,
+        [4] = 5,
+        [5] = 6,
+        [6] = 7,
+        [7] = 8,
+        [8] = 9,
+        [9] = 10,
     };
 
     private readonly Dictionary<char, int> _glyphMap = new()
     {
-        ['.'] = 36,
-        [','] = 37,
-        [':'] = 38,
-        [';'] = 39,
-        ['+'] = 40,
-        ['-'] = 41,
-        ['*'] = 42,
-        ['/'] = 43,
-        ['='] = 44,
-        ['%'] = 45,
-        ['('] = 46,
-        [')'] = 47,
-        ['['] = 48,
-        [']'] = 49,
-        ['{'] = 50,
-        ['}'] = 51,
-        ['<'] = 52,
-        ['>'] = 53,
-        ['!'] = 54,
-        ['?'] = 55,
-        ['@'] = 56,
-        ['#'] = 57,
-        ['$'] = 58,
-        ['^'] = 59,
-        ['&'] = 60,
-        ['_'] = 61,
-        ['\\'] = 62,
-        ['|'] = 63,
-        ['"'] = 64,
-        ['\''] = 65,
-        ['`'] = 66,
-        ['~'] = 67
+        [' '] = 0,
+        ['.'] = 37,
+        [','] = 38,
+        [':'] = 39,
+        [';'] = 40,
+        ['+'] = 41,
+        ['-'] = 42,
+        ['*'] = 43,
+        ['/'] = 44,
+        ['='] = 45,
+        ['%'] = 46,
+        ['('] = 47,
+        [')'] = 48,
+        ['['] = 49,
+        [']'] = 50,
+        ['{'] = 51,
+        ['}'] = 52,
+        ['<'] = 53,
+        ['>'] = 54,
+        ['!'] = 55,
+        ['?'] = 56,
+        ['@'] = 57,
+        ['#'] = 58,
+        ['$'] = 59,
+        ['^'] = 60,
+        ['&'] = 61,
+        ['_'] = 62,
+        ['\\'] = 63,
+        ['|'] = 64,
+        ['"'] = 65,
+        ['\''] = 66,
+        ['`'] = 67,
+        ['~'] = 68
     };
 
     private class PlayerHudSettings
@@ -164,7 +165,7 @@ public class CenterSpeed : IModSharpModule, IGameListener, IClientListener
         _sharedSystem.GetModSharp().InstallGameListener(this);
 
         var convarManager = _sharedSystem.GetConVarManager();
-        _particleConVar = convarManager.CreateConVar("ms_cspeed_particle", "particles/digits_x/digits_x.vpcf");
+        _particleConVar = convarManager.CreateConVar("ms_cspeed_particle", "particles/numbers/number_x.vpcf");
         _testLettersConVar = convarManager.CreateConVar("ms_cspeed_test_letters", "0");
         _testLettersStartFrameConVar = convarManager.CreateConVar("ms_cspeed_test_letters_start", "14");
         _testLettersCountConVar = convarManager.CreateConVar("ms_cspeed_test_letters_count", "9");
@@ -295,7 +296,7 @@ public class CenterSpeed : IModSharpModule, IGameListener, IClientListener
 
         if (!settings.Enabled) return;
 
-        var particleName = _particleConVar?.GetString() ?? "particles/digits_x/digits_x.vpcf";
+        var particleName = _particleConVar?.GetString() ?? "particles/numbers/number_x.vpcf";
 
 
         for (var i = 0; i < HudParticleCapacity; i++)
@@ -484,15 +485,27 @@ public class CenterSpeed : IModSharpModule, IGameListener, IClientListener
                     else
                     {
                         // Timer feed may be temporarily unavailable on join/map change.
-                        // Fall back to explicit text so HUD never appears blank.
+                        // Fall back to numeric speed so HUD never appears blank.
                         var pawn = controller.GetPlayerPawn();
                         if (pawn != null)
                         {
                             var v = pawn.GetAbsVelocity().Length2D();
                             speed = (int)Math.Clamp(v, 0f, 9999f);
                         }
-                        
-                        BuildWidgetGlyphLayout($"SPD {speed:0000}", settings, frameIndexes, glyphPositions, out glyphCount);
+
+                        var digits = new int[4]
+                        {
+                            speed / 1000,
+                            speed / 100  % 10,
+                            speed / 10   % 10,
+                            speed        % 10
+                        };
+                        glyphCount = 4;
+                        for (var i = 0; i < 4; i++)
+                        {
+                            frameIndexes[i] = _digitMap.GetValueOrDefault(digits[i], 0);
+                            glyphPositions[i] = GetGlyphPosition(i, glyphCount, HudDisplayMode.Speed, settings);
+                        }
                     }
 
                     break;
@@ -1192,7 +1205,8 @@ public class CenterSpeed : IModSharpModule, IGameListener, IClientListener
         frame = 0;
         if (c == ' ')
         {
-            return false;
+            frame = 0;
+            return true;
         }
 
         if (char.IsDigit(c))
@@ -1204,7 +1218,7 @@ public class CenterSpeed : IModSharpModule, IGameListener, IClientListener
         if (char.IsLetter(c))
         {
             var upper = char.ToUpperInvariant(c);
-            frame = 10 + (upper - 'A');
+            frame = 11 + (upper - 'A');
             return true;
         }
 

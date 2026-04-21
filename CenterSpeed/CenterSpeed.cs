@@ -9,6 +9,7 @@ using Sharp.Shared.Listeners;
 using Sharp.Shared.Managers;
 using Sharp.Shared.Objects;
 using Sharp.Shared.Types;
+using Source2Surf.Timer.Shared.Interfaces;
 
 namespace CenterSpeed;
 
@@ -23,7 +24,7 @@ public class CenterSpeed : IModSharpModule, IGameListener, IClientListener
     int IClientListener.ListenerVersion => IClientListener.ApiVersion;
     int IClientListener.ListenerPriority => 0;
 
-    private readonly string _sharpPath;
+        private readonly string _sharpPath;
     private readonly ISharedSystem _sharedSystem;
     private readonly IClientManager _clientManager;
     private readonly ITransmitManager _transmitManager;
@@ -32,8 +33,9 @@ public class CenterSpeed : IModSharpModule, IGameListener, IClientListener
     private readonly IEntityManager _entityManager;
     private readonly IHookManager _hookManager;
     private readonly ISharpModuleManager _modules;
-    private IModSharpModuleInterface<IClientPreference>? _cachedInterface;
-    private IDisposable? _callback;
+    private IModSharpModuleInterface<IClientPreference>? _cachedClientPrefInterface;
+    private IDisposable? _clientPrefCallback;
+    private IModSharpModuleInterface<ITimerHudFeed>? _cachedTimerInterface;
 
     // --- Per-player HUD state ---
     private readonly PlayerHudState?[] _huds = new PlayerHudState?[64];
@@ -42,34 +44,68 @@ public class CenterSpeed : IModSharpModule, IGameListener, IClientListener
     private IBaseEntity? _sharedTarget;
     private IConVar? _particleConVar;
 
-    private Dictionary<int, int> _digitMap = new()
+        // Character to particle frame mapping
+    // Frame 0 = blank, Frames 1-10 = 0-9, Frames 11-35 = A-Z
+    private readonly Dictionary<char, int> _charMap = new()
     {
-        [0] = 1,
-        [1] = 2,
-        [2] = 4,
-        [3] = 5,
-        [4] = 7,
-        [5] = 8,
-        [6] = 10,
-        [7] = 11,
-        [8] = 12,
-        [9] = 13,
+        // Blank/Space
+        [' '] = 0,
+        
+        // Digits 0-9 -> Frames 1-10
+        ['0'] = 1, ['1'] = 2, ['2'] = 3, ['3'] = 4, ['4'] = 5,
+        ['5'] = 6, ['6'] = 7, ['7'] = 8, ['8'] = 9, ['9'] = 10,
+        
+        // Letters A-Z -> Frames 11-35
+        ['A'] = 11, ['B'] = 12, ['C'] = 13, ['D'] = 14, ['E'] = 15,
+        ['F'] = 16, ['G'] = 17, ['H'] = 18, ['I'] = 19, ['J'] = 20,
+        ['K'] = 21, ['L'] = 22, ['M'] = 23, ['N'] = 24, ['O'] = 25,
+        ['P'] = 26, ['Q'] = 27, ['R'] = 28, ['S'] = 29, ['T'] = 30,
+        ['U'] = 31, ['V'] = 32, ['W'] = 33, ['X'] = 34, ['Y'] = 35, ['Z'] = 36,
+        
+        // Symbols (frames after Z - adjust as needed)
+        ['%'] = 37, ['/'] = 38, [':'] = 39, ['-'] = 40, ['+'] = 41, ['.'] = 42
     };
 
-    private class PlayerHudSettings
+        private class PlayerHudSettings
     {
+        // Legacy: kept for backward compatibility
         public float[] DigitOffsets = { -1.4f, -0.45f, 0.45f, 1.4f };
-
         public float HudScale = 0.04f;
         public float YOffset = -1f;
         public bool Enabled = false;
+
+        // Per-widget settings
+        public Dictionary<TimerWidgetType, WidgetConfig> Widgets = new()
+        {
+            [TimerWidgetType.Time] = new() { XOffset = 0f, YOffset = 1.5f, Scale = 0.05f, Visible = true },
+            [TimerWidgetType.Sync] = new() { XOffset = 0f, YOffset = 0.5f, Scale = 0.04f, Visible = true },
+            [TimerWidgetType.Jumps] = new() { XOffset = -2f, YOffset = -0.5f, Scale = 0.035f, Visible = true },
+            [TimerWidgetType.Strafes] = new() { XOffset = 2f, YOffset = -0.5f, Scale = 0.035f, Visible = true },
+            [TimerWidgetType.Checkpoint] = new() { XOffset = 0f, YOffset = -1.5f, Scale = 0.035f, Visible = true },
+            [TimerWidgetType.Status] = new() { XOffset = 0f, YOffset = 2.5f, Scale = 0.04f, Visible = true },
+            [TimerWidgetType.Track] = new() { XOffset = 0f, YOffset = 3.5f, Scale = 0.04f, Visible = true },
+            [TimerWidgetType.PbTime] = new() { XOffset = -2.5f, YOffset = -2.5f, Scale = 0.03f, Visible = true },
+            [TimerWidgetType.WrTime] = new() { XOffset = 2.5f, YOffset = -2.5f, Scale = 0.03f, Visible = true }
+        };
+    }
+
+    private class WidgetConfig
+    {
+        public float XOffset = 0f;
+        public float YOffset = 0f;
+        public float Scale = 0.04f;
+        public bool Visible = true;
     }
 
     private class PlayerHudState
     {
-        // Index 0 = thousands, 1 = hundreds, 2 = tens, 3 = ones
         public bool IsDisposed = false;
-        public IBaseParticle?[] Digits { get; } = new IBaseParticle?[4];
+        public Dictionary<TimerWidgetType, WidgetParticleState> Widgets = new();
+    }
+
+    private class WidgetParticleState
+    {
+        public List<IBaseParticle?> Particles = new();
     }
 
     public CenterSpeed(
@@ -87,7 +123,7 @@ public class CenterSpeed : IModSharpModule, IGameListener, IClientListener
         _logger = sharedSystem.GetLoggerFactory().CreateLogger<CenterSpeed>();
         _transmitManager = sharedSystem.GetTransmitManager();
         _hookManager = sharedSystem.GetHookManager();
-        _modules = sharedSystem.GetSharpModuleManager();
+                                _modules = sharedSystem.GetSharpModuleManager();
         _sharpPath = sharpPath;
     }
 
@@ -121,9 +157,9 @@ public class CenterSpeed : IModSharpModule, IGameListener, IClientListener
         _clientManager.RemoveClientListener(this);
         _sharedSystem.GetModSharp().RemoveGameListener(this);
 
-        _hookManager.PlayerRunCommand.RemoveHookPost(PlayerRunCommandPost);
+                _hookManager.PlayerRunCommand.RemoveHookPost(PlayerRunCommandPost);
         _hookManager.PlayerSpawnPost.RemoveForward(OnPlayerSpawned);
-        _callback?.Dispose();
+        _clientPrefCallback?.Dispose();
 
         for (var i = 0; i < 64; i++)
             KillPlayerHud(i);
@@ -168,7 +204,7 @@ public class CenterSpeed : IModSharpModule, IGameListener, IClientListener
         _playerSettings[client.Slot] = null;
     }
 
-    // -------------------------------------------------------------------------
+        // -------------------------------------------------------------------------
     // HUD management
 
     private void SpawnPlayerHud(IGameClient client)
@@ -182,7 +218,7 @@ public class CenterSpeed : IModSharpModule, IGameListener, IClientListener
 
         KillPlayerHud(slot); // clear any stale state
 
-
+        // Create shared info_target if needed
         if (_sharedTarget is null || !_sharedTarget.IsValid())
         {
             var targetKv = new Dictionary<string, KeyValuesVariantValueItem>
@@ -200,9 +236,6 @@ public class CenterSpeed : IModSharpModule, IGameListener, IClientListener
             _sharedTarget = target;
         }
 
-
-        // Lazy-init the one shared info_target (never modified after creation).
-
         var state = new PlayerHudState();
         var settings = _playerSettings[client.Slot];
         if (settings is null)
@@ -211,52 +244,83 @@ public class CenterSpeed : IModSharpModule, IGameListener, IClientListener
             _playerSettings[client.Slot] = settings;
         }
 
-        if (!settings.Enabled) return;
-
         var particleName = _particleConVar?.GetString() ?? "particles/numbers/number_x.vpcf";
 
-
-        for (var i = 0; i < 4; i++)
+        // Spawn particles for each visible widget
+        foreach (var (widgetType, config) in settings.Widgets)
         {
-            var kv = new Dictionary<string, KeyValuesVariantValueItem>
+            if (!config.Visible)
+                continue;
+
+            // Estimate max character count for this widget type
+            var maxChars = widgetType switch
             {
-                ["effect_name"] = particleName,
-                ["start_active"] = "0"
+                TimerWidgetType.Time => 8,        // "MM:SS.cc"
+                TimerWidgetType.Sync => 8,        // "SYNC X.X%"
+                TimerWidgetType.Jumps => 4,       // "9999"
+                TimerWidgetType.Strafes => 4,     // "9999"
+                TimerWidgetType.Checkpoint => 6,  // "9/99"
+                TimerWidgetType.Status => 6,      // "PAUSE"
+                TimerWidgetType.Track => 4,       // "T9999"
+                TimerWidgetType.PbTime => 12,     // "PB: MM:SS.cc"
+                TimerWidgetType.WrTime => 12,     // "WR: MM:SS.cc"
+                _ => 8
             };
 
-            var particle = _sharedSystem.GetEntityManager()
-                                        .SpawnEntitySync<IBaseParticle>("info_particle_system", kv);
+            var widgetState = new WidgetParticleState();
 
-            if (particle == null)
+            for (var i = 0; i < maxChars; i++)
             {
-                _logger.LogWarning("SpawnPlayerHud: failed to spawn digit {Index} for slot {Slot}", i, slot);
-                continue;
+                var kv = new Dictionary<string, KeyValuesVariantValueItem>
+                {
+                    ["effect_name"] = particleName,
+                    ["start_active"] = "0"
+                };
+
+                var particle = _sharedSystem.GetEntityManager()
+                                            .SpawnEntitySync<IBaseParticle>("info_particle_system", kv);
+
+                if (particle == null)
+                {
+                    _logger.LogWarning("SpawnPlayerHud: failed to spawn char {Index} for widget {Widget} slot {Slot}", i, widgetType, slot);
+                    continue;
+                }
+
+                particle.GetControlPointEntities()[17] = _sharedTarget.Handle;
+
+                // Position particles horizontally within the widget
+                var widgetWidth = maxChars * 0.95f;
+                var startX = -(widgetWidth / 2f);
+                var xPos = startX + (i * 0.95f);
+
+                particle.DataControlPoint = 33;
+                particle.DataControlPointValue = new Vector(xPos + config.XOffset, config.YOffset, 0f);
+
+                SetControlPointValue(particle, 32, new Vector(0f, 0f, 0f)); // frame (0 = blank)
+                SetControlPointValue(particle, 34, new Vector(config.Scale, 0f, 0f)); // scale
+                SetControlPointValue(particle, 16, new Vector(255f, 255f, 255f)); // color
+
+                particle.AcceptInput("Start");
+                particle.Active = true;
+
+                widgetState.Particles.Add(particle);
+                _transmitManager.AddEntityHooks(particle, false);
             }
 
-            particle.GetControlPointEntities()[17] = _sharedTarget.Handle;
-
-            particle.DataControlPoint = 33;
-            particle.DataControlPointValue = new Vector(settings.DigitOffsets[i], settings.YOffset, 0f);
-
-            SetControlPointValue(particle, 32, new Vector(0f, 0f, 0f)); // digit frame (0)
-            SetControlPointValue(particle, 34, new Vector(settings.HudScale, 0f, 0f)); // scale
-            SetControlPointValue(particle, 16, new Vector(255f, 255f, 255f)); // color
-
-            particle.AcceptInput("Start");
-            particle.Active = true;
-
-            state.Digits[i] = particle;
-            _transmitManager.AddEntityHooks(particle, false);
+            state.Widgets[widgetType] = widgetState;
         }
 
         // Set visibility: only visible to the owning player
         foreach (var con in _entityManager.GetPlayerControllers(true))
         {
-            for (var i = 0; i < 4; i++)
+            foreach (var widget in state.Widgets.Values)
             {
-                if (state.Digits[i] == null) continue;
-                bool shouldSee = (con.PlayerSlot == slot);
-                _transmitManager.SetEntityState(state.Digits[i].Index, con.Index, shouldSee, -1);
+                foreach (var particle in widget.Particles)
+                {
+                    if (particle == null) continue;
+                    bool shouldSee = (con.PlayerSlot == slot);
+                    _transmitManager.SetEntityState(particle.Index, con.Index, shouldSee, -1);
+                }
             }
         }
 
@@ -272,22 +336,27 @@ public class CenterSpeed : IModSharpModule, IGameListener, IClientListener
         _huds[slot] = null;
         _lastSpeed[slot] = 0;
 
-        foreach (var particle in state.Digits)
+        foreach (var widget in state.Widgets.Values)
         {
-            if (particle == null || !particle.IsValid()) continue;
+            foreach (var particle in widget.Particles)
+            {
+                if (particle == null || !particle.IsValid()) continue;
 
-            particle.AcceptInput("Stop");
-            particle.AcceptInput("DestroyImmediately");
-            particle.Active = false;
+                particle.AcceptInput("Stop");
+                particle.AcceptInput("DestroyImmediately");
+                particle.Active = false;
+            }
         }
+
+        state.Widgets.Clear();
     }
 
-    // -------------------------------------------------------------------------
+        // -------------------------------------------------------------------------
     // Update timer — runs every 0.1 s
 
     private void PlayerRunCommandPost(IPlayerRunCommandHookParams param, HookReturnValue<EmptyHookReturn> retValue)
     {
-        if (_modSharp.GetGlobals().TickCount % 10 == 0)
+        if (_modSharp.GetGlobals().TickCount % 10 != 0)
             return;
 
         var client = param.Client;
@@ -305,54 +374,53 @@ public class CenterSpeed : IModSharpModule, IGameListener, IClientListener
         if (controller == null || controller.ConnectedState != PlayerConnectedState.PlayerConnected)
             return;
 
-
-        // Default to 0 so dead/spectating players show "0000".
-        var speed = 0;
-        var pawn = controller.GetPlayerPawn();
-
-        if (pawn != null)
+        var timerInterface = GetTimerInterface();
+        if (timerInterface == null)
         {
-            var v = pawn.GetAbsVelocity().Length2D();
-            speed = (int)Math.Clamp(v, 0f, 9999f);
+            _logger.LogWarning("Timer interface not available, skipping HUD update");
+            return;
         }
-        var digits = new int[4]
-        {
-            speed / 1000,
-            speed / 100  % 10,
-            speed / 10   % 10,
-            speed        % 10
-        };
 
-        // Update digit frames.
-        for (var i = 0; i < 4; i++)
+        // Update each widget
+        foreach (var (widgetType, widgetState) in state.Widgets)
         {
-            var particle = state.Digits[i];
-            if (particle == null || state.IsDisposed)
-            {
+            if (!timerInterface.TryGetWidgetText(client.Slot, widgetType, out var text))
                 continue;
-            }
 
-            var digit = _digitMap.GetValueOrDefault(digits[i], 1);
+            var particles = widgetState.Particles;
+            var textLength = text.Length;
+            var maxParticles = particles.Count;
 
-            SetControlPointValue(particle, 32, new Vector((float)digit, 0f, 0f));
-            if (_lastSpeed[client.Slot] > speed)
+            // Calculate starting offset to center the text
+            var startX = (textLength - 1) / 2f;
+
+            for (var i = 0; i < maxParticles; i++)
             {
-                SetControlPointValue(particle, 16, new Vector(255f, 0f, 0f));
-            }
-            else if (_lastSpeed[client.Slot] < speed)
-            {
-                SetControlPointValue(particle, 16, new Vector(0f, 255f, 0f));
-            }
-            else
-            {
-                SetControlPointValue(particle, 16, new Vector(255f, 255f, 255f));
+                var particle = particles[i];
+                if (particle == null || state.IsDisposed)
+                    continue;
+
+                if (i < textLength)
+                {
+                    // Map character to particle frame
+                    var charIndex = i - startX;
+                    if (charIndex >= 0 && charIndex < textLength)
+                    {
+                        var c = text[i];
+                        var frame = _charMap.GetValueOrDefault(c, 0);
+                        SetControlPointValue(particle, 32, new Vector(frame, 0f, 0f));
+                    }
+                }
+                else
+                {
+                    // Hide extra particles by setting frame to blank
+                    SetControlPointValue(particle, 32, new Vector(0f, 0f, 0f));
+                }
             }
         }
-
-        _lastSpeed[client.Slot] = speed;
     }
 
-    // -------------------------------------------------------------------------
+        // -------------------------------------------------------------------------
     // !hudsettings command
 
     private ECommandAction OnHudSettingsCommand(IGameClient client, StringCommand command)
@@ -367,6 +435,94 @@ public class CenterSpeed : IModSharpModule, IGameListener, IClientListener
         }
 
         var sub = command.GetArg(1).ToLowerInvariant();
+
+        if (sub == "widget")
+        {
+            // !hudsettings widget <Time|Sync|Jumps|Strafes|Checkpoint|Status|Track|PbTime|WrTime> <toggle|offset|scale>
+            if (command.ArgCount < 3)
+            {
+                client.GetPlayerController()?.Print(HudPrintChannel.Chat, " [HUD] Usage: !hudsettings widget <Type> <toggle|offset <X>|scale <S>>");
+                return ECommandAction.Stopped;
+            }
+
+            var widgetSub = command.GetArg(2).ToLowerInvariant();
+            
+            if (Enum.TryParse<TimerWidgetType>(command.GetArg(2), true, out var widgetType))
+            {
+                var widget = settings.Widgets[widgetType];
+                
+                if (command.ArgCount >= 4)
+                {
+                    var propSub = command.GetArg(3).ToLowerInvariant();
+                    
+                    if (propSub == "toggle")
+                    {
+                        widget.Visible = !widget.Visible;
+                        SaveSettings(client.SteamId, settings);
+                        SpawnPlayerHud(client);
+                        client.GetPlayerController()?.Print(HudPrintChannel.Chat, $" [HUD] Widget {widgetType} {(widget.Visible ? "enabled" : "disabled")}");
+                    }
+                    else if (propSub == "offset")
+                    {
+                        if (command.ArgCount >= 5 && float.TryParse(command.GetArg(4), System.Globalization.NumberStyles.Float,
+                            System.Globalization.CultureInfo.InvariantCulture, out var xOffset))
+                        {
+                            widget.XOffset = Math.Clamp(xOffset, -10f, 10f);
+                            SaveSettings(client.SteamId, settings);
+                            SpawnPlayerHud(client);
+                            client.GetPlayerController()?.Print(HudPrintChannel.Chat, $" [HUD] Widget {widgetType} X-Offset set to {widget.XOffset:F2}");
+                        }
+                        else
+                        {
+                            client.GetPlayerController()?.Print(HudPrintChannel.Chat, " [HUD] Usage: !hudsettings widget <Type> offset <X>");
+                        }
+                    }
+                    else if (propSub == "yoffset")
+                    {
+                        if (command.ArgCount >= 5 && float.TryParse(command.GetArg(4), System.Globalization.NumberStyles.Float,
+                            System.Globalization.CultureInfo.InvariantCulture, out var yOffset))
+                        {
+                            widget.YOffset = Math.Clamp(yOffset, -10f, 10f);
+                            SaveSettings(client.SteamId, settings);
+                            SpawnPlayerHud(client);
+                            client.GetPlayerController()?.Print(HudPrintChannel.Chat, $" [HUD] Widget {widgetType} Y-Offset set to {widget.YOffset:F2}");
+                        }
+                        else
+                        {
+                            client.GetPlayerController()?.Print(HudPrintChannel.Chat, " [HUD] Usage: !hudsettings widget <Type> yoffset <Y>");
+                        }
+                    }
+                    else if (propSub == "scale")
+                    {
+                        if (command.ArgCount >= 5 && float.TryParse(command.GetArg(4), System.Globalization.NumberStyles.Float,
+                            System.Globalization.CultureInfo.InvariantCulture, out var scale))
+                        {
+                            widget.Scale = Math.Clamp(scale, 0f, 10f);
+                            SaveSettings(client.SteamId, settings);
+                            SpawnPlayerHud(client);
+                            client.GetPlayerController()?.Print(HudPrintChannel.Chat, $" [HUD] Widget {widgetType} Scale set to {widget.Scale:F4}");
+                        }
+                        else
+                        {
+                            client.GetPlayerController()?.Print(HudPrintChannel.Chat, " [HUD] Usage: !hudsettings widget <Type> scale <S>");
+                        }
+                    }
+                    else
+                    {
+                        client.GetPlayerController()?.Print(HudPrintChannel.Chat, " [HUD] Subcommands: toggle | offset <X> | yoffset <Y> | scale <S>");
+                    }
+                }
+                else
+                {
+                    client.GetPlayerController()?.Print(HudPrintChannel.Chat, $" [HUD] Widget {widgetType}: Visible={widget.Visible}, Offset=({widget.XOffset:F2}, {widget.YOffset:F2}), Scale={widget.Scale:F4}");
+                }
+            }
+            else
+            {
+                client.GetPlayerController()?.Print(HudPrintChannel.Chat, " [HUD] Invalid widget type. Use: Time, Sync, Jumps, Strafes, Checkpoint, Status, Track, PbTime, WrTime");
+            }
+            return ECommandAction.Stopped;
+        }
 
         if (sub == "offset")
         {
@@ -432,7 +588,7 @@ public class CenterSpeed : IModSharpModule, IGameListener, IClientListener
         }
         else
         {
-            client.GetPlayerController()?.Print(HudPrintChannel.Chat, " [HUD] Subcommands: offset <1-4> <-10..10> | scale <0-10> | yoffset <-10-10> | info");
+            client.GetPlayerController()?.Print(HudPrintChannel.Chat, " [HUD] Subcommands: widget <Type> <toggle|offset|yoffset|scale> | offset <1-4> | scale | yoffset | info");
         }
         return ECommandAction.Stopped;
     }
@@ -440,53 +596,84 @@ public class CenterSpeed : IModSharpModule, IGameListener, IClientListener
     private void PrintHudSettings(IGameClient client, PlayerHudSettings settings)
     {
         var o = settings.DigitOffsets;
-        client.GetPlayerController()?.Print(HudPrintChannel.Chat, $" [HUD] Offsets: 1={o[0]:F2}  2={o[1]:F2}  3={o[2]:F2}  4={o[3]:F2}");
-        client.GetPlayerController()?.Print(HudPrintChannel.Chat, $" [HUD] Scale: {settings.HudScale:F4}");
-        client.GetPlayerController()?.Print(HudPrintChannel.Chat, $" [HUD] Y-Offset: {settings.YOffset:F4}");
+        client.GetPlayerController()?.Print(HudPrintChannel.Chat, $" [HUD] Legacy Offsets: 1={o[0]:F2}  2={o[1]:F2}  3={o[2]:F2}  4={o[3]:F2}");
+        client.GetPlayerController()?.Print(HudPrintChannel.Chat, $" [HUD] Legacy Scale: {settings.HudScale:F4}");
+        client.GetPlayerController()?.Print(HudPrintChannel.Chat, $" [HUD] Legacy Y-Offset: {settings.YOffset:F4}");
+        client.GetPlayerController()?.Print(HudPrintChannel.Chat, " [HUD] Widget Settings:");
+        foreach (var (widgetType, config) in settings.Widgets)
+        {
+            client.GetPlayerController()?.Print(HudPrintChannel.Chat, $"   {widgetType}: Visible={config.Visible}, Offset=({config.XOffset:F2}, {config.YOffset:F2}), Scale={config.Scale:F4}");
+        }
     }
 
-    // -------------------------------------------------------------------------
+        // -------------------------------------------------------------------------
     // ClientPrefs integration
 
     public void OnAllModulesLoaded()
     {
-        _cachedInterface = _modules.GetOptionalSharpModuleInterface<IClientPreference>(IClientPreference.Identity);
-        if (_cachedInterface?.Instance is { } instance)
-            _callback = instance.ListenOnLoad(OnCookieLoad);
+        _cachedClientPrefInterface = _modules.GetOptionalSharpModuleInterface<IClientPreference>(IClientPreference.Identity);
+        if (_cachedClientPrefInterface?.Instance is { } instance)
+            _clientPrefCallback = instance.ListenOnLoad(OnCookieLoad);
+
+        _cachedTimerInterface = _modules.GetOptionalSharpModuleInterface<ITimerHudFeed>(ITimerHudFeed.Identity);
+        _logger.LogInformation("Timer interface bridged: {Bridged}", _cachedTimerInterface != null);
     }
 
     public void OnLibraryConnected(string name)
     {
-        if (!name.Equals("ClientPreferences")) return;
-        _cachedInterface = _modules.GetRequiredSharpModuleInterface<IClientPreference>(IClientPreference.Identity);
-        if (_cachedInterface?.Instance is { } instance)
-            _callback = instance.ListenOnLoad(OnCookieLoad);
+        if (name.Equals("ClientPreferences", StringComparison.Ordinal))
+        {
+            _cachedClientPrefInterface = _modules.GetRequiredSharpModuleInterface<IClientPreference>(IClientPreference.Identity);
+            if (_cachedClientPrefInterface?.Instance is { } instance)
+                _clientPrefCallback = instance.ListenOnLoad(OnCookieLoad);
+        }
+        else if (name.Equals("Timer", StringComparison.Ordinal) || name.Equals("SurfTimer", StringComparison.Ordinal))
+        {
+            _cachedTimerInterface = _modules.GetRequiredSharpModuleInterface<ITimerHudFeed>(ITimerHudFeed.Identity);
+            _logger.LogInformation("Timer interface connected via library event");
+        }
     }
 
     public void OnLibraryDisconnect(string name)
     {
-        if (!name.Equals("ClientPreferences")) return;
-        _cachedInterface = null;
-    }
-
-    private IClientPreference? GetInterface()
-    {
-        if (_cachedInterface?.Instance is null)
+        if (name.Equals("ClientPreferences", StringComparison.Ordinal))
         {
-            _cachedInterface = _modules.GetOptionalSharpModuleInterface<IClientPreference>(IClientPreference.Identity);
-            if (_cachedInterface?.Instance is { } instance)
-                _callback = instance.ListenOnLoad(OnCookieLoad);
+            _cachedClientPrefInterface = null;
         }
-        return _cachedInterface?.Instance;
+        else if (name.Equals("Timer", StringComparison.Ordinal) || name.Equals("SurfTimer", StringComparison.Ordinal))
+        {
+            _cachedTimerInterface = null;
+        }
     }
 
-    private void OnCookieLoad(IGameClient client)
+    private IClientPreference? GetClientPrefInterface()
     {
-        if (GetInterface() is not { } cp) return;
+        if (_cachedClientPrefInterface?.Instance is null)
+        {
+            _cachedClientPrefInterface = _modules.GetOptionalSharpModuleInterface<IClientPreference>(IClientPreference.Identity);
+            if (_cachedClientPrefInterface?.Instance is { } instance)
+                _clientPrefCallback = instance.ListenOnLoad(OnCookieLoad);
+        }
+        return _cachedClientPrefInterface?.Instance;
+    }
+
+    private ITimerHudFeed? GetTimerInterface()
+    {
+        if (_cachedTimerInterface?.Instance is null)
+        {
+            _cachedTimerInterface = _modules.GetOptionalSharpModuleInterface<ITimerHudFeed>(ITimerHudFeed.Identity);
+        }
+        return _cachedTimerInterface?.Instance;
+    }
+
+        private void OnCookieLoad(IGameClient client)
+    {
+        if (GetClientPrefInterface() is not { } cp) return;
 
         var settings = _playerSettings[client.Slot] ??= new PlayerHudSettings();
         var id = client.SteamId;
 
+        // Load legacy settings for backward compatibility
         for (var i = 0; i < 4; i++)
         {
             if (cp.GetCookie(id, $"hud_d{i}") is { } c &&
@@ -513,8 +700,9 @@ public class CenterSpeed : IModSharpModule, IGameListener, IClientListener
 
     private void SaveSettings(ulong steamId, PlayerHudSettings s)
     {
-        if (GetInterface() is not { } cp) return;
+        if (GetClientPrefInterface() is not { } cp) return;
 
+        // Save legacy settings for backward compatibility
         for (var i = 0; i < 4; i++)
             cp.SetCookie(steamId, $"hud_d{i}",
                 s.DigitOffsets[i].ToString("F4", System.Globalization.CultureInfo.InvariantCulture));

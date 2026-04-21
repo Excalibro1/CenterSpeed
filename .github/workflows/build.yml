@@ -1,0 +1,66 @@
+name: Build CenterSpeed
+
+on:
+  push:
+    branches:
+      - "**"
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup .NET 10
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: "10.0.x"
+
+      - name: Restore
+        run: dotnet restore CenterSpeed/CenterSpeed.csproj
+
+      - name: Build
+        id: build
+        shell: bash
+        run: |
+          set -o pipefail
+          dotnet build CenterSpeed/CenterSpeed.csproj -c Release -p:Platform=x64 -p:TreatWarningsAsErrors=false --no-restore 2>&1 | tee build.log
+          echo "exit_code=${PIPESTATUS[0]}" >> "$GITHUB_OUTPUT"
+
+      - name: Upload build log
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: CenterSpeed-build-log
+          path: build.log
+          if-no-files-found: ignore
+
+      - name: Collect build outputs
+        if: steps.build.outputs.exit_code == '0'
+        id: collect
+        shell: bash
+        run: |
+          mkdir -p artifact_out
+          find . -type f ! -path "*/obj/*" \( \
+            -name "CenterSpeed.dll" -o \
+            -name "CenterSpeed.deps.json" -o \
+            -name "CenterSpeed.runtimeconfig.json" \
+          \) -print -exec cp --parents {} artifact_out/ \;
+
+          file_count=$(find artifact_out -type f | wc -l)
+          echo "file_count=${file_count}" >> "$GITHUB_OUTPUT"
+          if [ "${file_count}" -eq 0 ]; then
+            echo "No build output files found under bin/Release."
+            exit 1
+          fi
+
+      - name: Upload artifact
+        if: steps.build.outputs.exit_code == '0' && steps.collect.outputs.file_count != '0'
+        uses: actions/upload-artifact@v4
+        with:
+          name: CenterSpeed-build
+          path: artifact_out
+          if-no-files-found: error
